@@ -8,7 +8,7 @@ def process_page(image):
 
 
 if __name__ == '__main__':
-    dir = r'C:\Users\yuris\Desktop\guitar\locked girls brand new rocket'
+    dir = 'C:\\Users\\yuris\\Desktop\\guitar\\locked girls brand new rocket'
     images_path = glob.glob(dir + r'\*.png')
     images_path.sort()
 
