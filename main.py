@@ -291,7 +291,6 @@ class Animation(Scene):
                     next(_it2, None)
                     for i, (now_point, next_point) in enumerate(zip(_it1, _it2)):
                         if next_point is not None:
-                            # self.wait(_durations[i], frozen_frame=False)
                             self.play(_note.animate.shift(DOWN * (next_point.value - now_point.value)/2 * fb.string_gap),
                                       run_time=_durations[i], rate_functions=rate_functions.linear)
 
