@@ -1,5 +1,7 @@
 from guitarpro import parse, Song
 
+from utils.utils import get_two_iters
+
 import numpy as np
 
 def get_bend_points_iter(points):
@@ -10,6 +12,19 @@ def get_beats_iter(song: Song):
     for measure in song.tracks[0].measures:
         for beat in measure.voices[0].beats:
             yield beat
+
+def extract_and_adjust_bend_durations(now_beat, beat_run_time, frame_rate):
+    now_point_iter, next_point_iter = get_two_iters(get_bend_points_iter(now_beat.notes[0].effect.bend.points))
+
+    durations = []
+    for now_point, next_point in zip(now_point_iter, next_point_iter):
+        if next_point is not None:
+            durations.append((next_point.position - now_point.position)/12*beat_run_time)
+    for i, _duration in enumerate(durations[:-1]):
+        durations[i] = round(_duration * frame_rate) / frame_rate
+    durations = np.array(durations)
+    durations[-1] = beat_run_time - np.sum(durations[:-1])
+    return durations
 
 def extract_durations(song: Song, bpm=None):
     if bpm is None:
