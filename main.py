@@ -82,6 +82,7 @@ class Animation(Scene):
             if now_beat.notes[0].effect.slides:
                 if now_beat.notes[0].effect.slides[0] != SlideType.legatoSlideTo:
                     raise NotImplementedError
+                # self.play(TABSlide(fb, now_beat, future_beat, run_time=duration_sec))
                 slide_animation(self, fb, now_beat, future_beat, duration_sec)
             elif now_beat.notes[0].effect.grace:
                 grace_animation(self, fb, now_beat, duration_sec, config['frame_rate'])

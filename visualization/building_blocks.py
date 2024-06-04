@@ -1,9 +1,36 @@
 from manim import *
+from manim.scene.scene import Scene
+from fretboard.fretboard import FretBoard
 
 from tab_processing.tab_processing import extract_and_adjust_bend_durations, get_bend_points_iter
 from utils.utils import get_two_iters
 
-def slide_animation(scene, fb, now_beat, future_beat, run_time):
+# ---------------------------------------
+# doesn't work for some reason
+# ----------------------------------------
+# class TABSlide(Animation):
+#     def __init__(self, fb, now_beat, future_beat, **kwargs):
+#         super().__init__(fb, **kwargs)
+#         self.mobject = fb
+#         self.now_beat = now_beat
+#         self.future_beat = future_beat
+#         self.total_shift = LEFT * (self.now_beat.notes[0].value - self.future_beat.notes[0].value) * self.mobject.fret_length
+    
+#     def begin(self):
+#         self.note = self.mobject.create_playing_note_circle((self.now_beat.notes[0].string, self.now_beat.notes[0].value))
+#         self.original_position = self.note.get_center()
+#         self.mobject.add(self.note)
+#         super().begin()
+    
+#     def clean_up_from_scene(self, scene: Scene) -> None:
+#         super().clean_up_from_scene(scene)
+#         scene.remove(self.note)
+    
+#     def interpolate_mobject(self, alpha: float) -> None:
+#         self.note.move_to(self.original_position + alpha * self.total_shift)
+#         return
+
+def slide_animation(scene: Scene, fb: FretBoard, now_beat, future_beat, run_time):
     note = fb.create_playing_note_circle((now_beat.notes[0].string, now_beat.notes[0].value))
     scene.add(note)
     scene.play(

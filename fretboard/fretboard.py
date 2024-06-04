@@ -237,5 +237,7 @@ class FretBoard(VGroup):
             return create_note_circle(radius=0.3 * self.string_gap, interval=interval)
     
     def create_playing_note_circle(self, string_fret=None):
+        if string_fret is None:
+            return Circle(radius=0.5 * self.string_gap, color=RED, stroke_color=BLACK, fill_opacity=0.6).set_z_index(2)
         return Circle(radius=0.5 * self.string_gap, color=RED, stroke_color=BLACK, fill_opacity=0.6).set_z_index(2)\
             .move_to(self.string_fret_to_pos(string_fret[0], string_fret[1]))
