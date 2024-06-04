@@ -41,7 +41,10 @@ class Animation(Scene):
         self.next_section()
         prev_beat = None
         now_beat_iter, next_beat_iter = get_two_iters(get_beats_iter(song))
-        for duration_sec, now_beat, future_beat in zip(durations, now_beat_iter, next_beat_iter):
+        for beat_count, (duration_sec, now_beat) in enumerate(zip(durations, now_beat_iter)):
+            if beat_count < len(durations) - 1:
+                future_beat = next(next_beat_iter)
+            
             if now_beat.status == BeatStatus.empty or now_beat.status == BeatStatus.rest:
                 self.wait(duration_sec, frozen_frame=True)
                 continue
