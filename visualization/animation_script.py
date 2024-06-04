@@ -18,8 +18,12 @@ def demonstrate_scale_structure(scene: Scene, fb: FretBoard, song: Song, mode=No
     scene.play(FadeIn(sample_slack, shift=0.5 * UP))
     scene.wait(1)
 
-    text_key = Text("G Dorian", font_size=50, color=BLACK).shift(UP*3)
-    scene.play(Write(text_key))
+    text_title = Text("ALONE", font_size=50, color=BLACK).shift(UP*3)
+    text_artist = Text("高中正义", font_size=25, color=BLACK).next_to(text_title, RIGHT)
+    text_key = Text("G Dorian", font_size=20, color=BLACK).align_to(fb.fret_lines[0], LEFT).align_to(fb.strings[-1], DOWN).shift(UP * 0.1)
+
+    text_song_info = VGroup(text_title, text_artist, text_key)
+    scene.play(FadeIn(text_song_info))
     scene.wait(1)
 
     text_roots = Text("Root", font_size=25, color=BLACK).shift(UP*2)

@@ -5,10 +5,12 @@ from fretboard.fretboard import FretBoard
 
 from visualization.animation_script import demonstrate_scale_structure
 from tab_processing.tab_processing import get_beats_iter, get_bend_points_iter, adjust_duration, extract_durations
+from tab_processing.chop_tab import chop_tab
 
 import numpy as np
 from itertools import tee
 from utils.color import *
+import glob
 
 def get_two_iters(iter):
     now_it, next_it = tee(iter)
@@ -19,18 +21,23 @@ class Animation(Scene):
     def construct(self):
         # parameters -----------------------------------------------------
         song = parse('test\\ALONE.gp5')
-        bpm = 116.6 # part 1
-        # bpm = 116.5  # part 2
+        bpm = 116.6
+
+        chop_tab('test\\tab_pages')
+
+        num_measures_in_line = np.load('test\\tab_pages\\num_measures_in_line.npy')
+        measure_next_tab = np.cumsum(num_measures_in_line[0::2] + num_measures_in_line[1::2])
+        chopped_tabs_path = glob.glob('test\\tab_pages\\output\\*_*.png')
 
         background = ImageMobject("test\\merge.png")
         background.scale(2)
         
         # initialization--------------------------------------------------
         self.add(background)
-        fb = FretBoard().shift(DOWN*0.5)
+        fb = FretBoard()
         self.add(fb)
 
-        durations = extract_durations(song, bpm)
+        durations, beat_measure_map = extract_durations(song, bpm)
         durations = adjust_duration(durations, song, config['frame_rate'])
 
         # song structure--------------------------------------------------
@@ -39,9 +46,27 @@ class Animation(Scene):
 
         # tab animations--------------------------------------------------
         self.next_section()
+
+        lower_tab = ImageMobject(chopped_tabs_path[1]).to_edge(DOWN, buff=0)
+        upper_tab = ImageMobject(chopped_tabs_path[0]).next_to(lower_tab, UP, buff=0)
+        self.add(upper_tab)
+        self.add(lower_tab)
+
         prev_beat = None
         now_beat_iter, next_beat_iter = get_two_iters(get_beats_iter(song))
         for beat_count, (duration_sec, now_beat) in enumerate(zip(durations, now_beat_iter)):
+            if beat_count in beat_measure_map:
+                measure = beat_measure_map[beat_count]
+                if measure in measure_next_tab:
+                    idx = np.where(measure_next_tab == measure)[0][0]
+
+                    self.remove(upper_tab)
+                    self.remove(lower_tab)
+                    lower_tab = ImageMobject(chopped_tabs_path[3 + 2 * idx]).to_edge(DOWN, buff=0)
+                    upper_tab = ImageMobject(chopped_tabs_path[2 + 2 * idx]).next_to(lower_tab, UP, buff=0)
+                    self.add(upper_tab)
+                    self.add(lower_tab)
+
             if beat_count < len(durations) - 1:
                 future_beat = next(next_beat_iter)
             
@@ -71,12 +96,12 @@ class Animation(Scene):
 
                 grace_duration_percentage = now_beat.duration.value / now_beat.notes[0].effect.grace.duration
                 grace_duration_frame = round(duration_sec * grace_duration_percentage * config['frame_rate'])
-                self.wait(grace_duration_frame / config['frame_rate'])
-
                 self.play(_note.animate
-                            .shift(LEFT * (now_beat.notes[0].effect.grace.fret - now_beat.notes[0].value) * fb.fret_length),
-                            run_time=(duration_sec * config['frame_rate'] - grace_duration_frame) /
-                                    config['frame_rate'], rate_functions=rate_functions.linear)
+                        .shift(LEFT * (now_beat.notes[0].effect.grace.fret - now_beat.notes[0].value) * fb.fret_length),
+                        run_time=grace_duration_frame / config['frame_rate'], rate_functions=rate_functions.linear)
+                
+                self.wait((duration_sec * config['frame_rate'] - grace_duration_frame) /
+                                    config['frame_rate'])
 
             elif now_beat.notes[0].effect.bend:
                 string_id = 6 - now_beat.notes[0].string
@@ -87,14 +112,26 @@ class Animation(Scene):
 
                 line = always_redraw(
                     lambda: VGroup(
-                        Line(fb.string_fret_to_pos(now_beat.notes[0].string, 0) + RIGHT * 0.5 * fb.fret_length, _note.get_center(), color=BLACK),
-                        Line(_note.get_center(), fb.string_fret_to_pos(now_beat.notes[0].string, fb.frets_number) + RIGHT * 0.5 * fb.fret_length, color=BLACK)
+                        Line(fb.string_fret_to_pos(now_beat.notes[0].string, 0) + RIGHT * 0.5 * fb.fret_length, 
+                             _note.get_center(), 
+                             color=BLACK, 
+                             stroke_width = fb.strings[string_id].stroke_width),
+                        Line(_note.get_center(), 
+                             fb.string_fret_to_pos(now_beat.notes[0].string, fb.frets_number) + RIGHT * 0.5 * fb.fret_length, 
+                             color=BLACK, 
+                             stroke_width = fb.strings[string_id].stroke_width)
                     )
                 )
                 line2 = always_redraw(
                     lambda: VGroup(
-                        Line(fb.string_fret_to_pos(now_beat.notes[0].string+1, 0) + RIGHT * 0.5 * fb.fret_length, np.array([_note.get_center()[0], np.min((_note.get_center()[1], fb.strings[string_id-1].get_center()[1])), 0]), color=BLACK),
-                        Line(np.array([_note.get_center()[0], np.min((_note.get_center()[1], fb.strings[string_id-1].get_center()[1])), 0]), fb.string_fret_to_pos(now_beat.notes[0].string+1, fb.frets_number) + RIGHT * 0.5 * fb.fret_length, color=BLACK)
+                        Line(fb.string_fret_to_pos(now_beat.notes[0].string+1, 0) + RIGHT * 0.5 * fb.fret_length, 
+                             np.array([_note.get_center()[0], np.min((_note.get_center()[1], fb.strings[string_id-1].get_center()[1])), 0]), 
+                             color=BLACK, 
+                             stroke_width = fb.strings[string_id-1].stroke_width),
+                        Line(np.array([_note.get_center()[0], np.min((_note.get_center()[1], fb.strings[string_id-1].get_center()[1])), 0]), 
+                             fb.string_fret_to_pos(now_beat.notes[0].string+1, fb.frets_number) + RIGHT * 0.5 * fb.fret_length, 
+                             color=BLACK, 
+                             stroke_width = fb.strings[string_id-1].stroke_width)
                     )
                 )
                 self.add(_note, line, line2)

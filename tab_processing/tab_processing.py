@@ -18,26 +18,30 @@ def extract_durations(song: Song, bpm=None):
             or song.tracks[0].measures[0].timeSignature.denominator.value != 4:
         raise NotImplementedError
 
+    beat_measure_map = dict()
     # a whole note should last 4*60/bpm sec
     durations = []  # [duration_sec]
+    beat_count = 0
     for i, measure in enumerate(song.tracks[0].measures):
+        beat_measure_map[beat_count] = i
         for beat in measure.voices[0].beats:
             if beat.status.value == 0:  # empty measure
                 durations.append(4 * 60 / bpm)
-                continue
-
-            _beat_duration_sec = 1/bpm/16 * beat.duration.time
-            durations.append(_beat_duration_sec)
+            else:
+                _beat_duration_sec = 1/bpm/16 * beat.duration.time
+                durations.append(_beat_duration_sec)
 
             # check for not implemented features
             for note in beat.notes:
                 if note.effect.slides:
                     if note.effect.slides[0].value != 2:
                         raise NotImplementedError
+            
+            beat_count = beat_count + 1
 
     durations = np.array(durations)
     # np.save('durations.npy', durations)
-    return durations
+    return durations, beat_measure_map
 
 def adjust_duration(durations, song: Song, frame_rate:int):
     # not-on-beat grace starts early

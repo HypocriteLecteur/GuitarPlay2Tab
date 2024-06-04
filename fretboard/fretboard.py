@@ -93,6 +93,10 @@ class FretBoard(VGroup):
             return "4"
         elif diff == 10:
             return "b7"
+        elif diff == 2:
+            return "2"
+        elif diff == 9:
+            return "6"
         return None
 
     def confine_to_fretboard(self, group_position):
