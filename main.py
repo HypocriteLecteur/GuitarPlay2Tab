@@ -4,7 +4,7 @@ from guitarpro import parse, BeatStatus, NoteType, SlideType
 from fretboard.fretboard import FretBoard
 
 from visualization.animation_script import demonstrate_scale_structure
-from tab_processing.tab_processing import get_beats_iter, get_bend_points_iter, adjust_duration
+from tab_processing.tab_processing import get_beats_iter, get_bend_points_iter, adjust_duration, extract_durations
 
 import numpy as np
 from itertools import tee
@@ -19,9 +19,8 @@ class Animation(Scene):
     def construct(self):
         # parameters -----------------------------------------------------
         song = parse('test\\ALONE.gp5')
-
-        durations = np.load('test\\durations.npy')
-        durations = adjust_duration(durations, song, config['frame_rate'])
+        bpm = 116.6 # part 1
+        # bpm = 116.5  # part 2
 
         background = ImageMobject("test\\merge.png")
         background.scale(2)
@@ -30,6 +29,9 @@ class Animation(Scene):
         self.add(background)
         fb = FretBoard().shift(DOWN*0.5)
         self.add(fb)
+
+        durations = extract_durations(song, bpm)
+        durations = adjust_duration(durations, song, config['frame_rate'])
 
         # song structure--------------------------------------------------
         self.next_section(skip_animations=True)
