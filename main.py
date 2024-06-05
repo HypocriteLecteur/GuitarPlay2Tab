@@ -92,7 +92,6 @@ class Animation(Scene):
                 normal_animation(scene, fb, now_beat, duration_sec)
             prev_beat = now_beat
 
-
 with tempconfig({"quality": "low_quality", "disable_caching": True, 'frame_rate': 30, 'preview': True}):
     scene = Animation()
     scene.render()

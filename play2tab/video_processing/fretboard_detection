@@ -1,0 +1,16 @@
+import cv2
+
+if __name__ == '__main__':
+    frame_number = 200
+    cap = cv2.VideoCapture('test\\guitar.mp4')
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number-1)
+    ret, frame = cap.read()
+
+    lower_threshold = 20
+    high_threshold = 200
+    aperture_size = 3
+    is_L2gradient = True
+    edges = cv2.Canny(frame, lower_threshold, high_threshold, True)
+
+    cv2.imshow('', frame)
+    cv2.waitKey()
