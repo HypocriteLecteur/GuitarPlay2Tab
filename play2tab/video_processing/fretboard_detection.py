@@ -3,14 +3,11 @@ import numpy as np
 from skimage.transform import hough_line, hough_line_peaks
 from itertools import combinations
 from utils.utils import angle_diff
+import matplotlib.pyplot as plt
+from scipy.spatial.distance import pdist, squareform
+from sklearn.cluster import SpectralClustering
 
 fret_length_scaling = 2**(1/12) / (2**(1/12) - 1)
-
-line_template = np.array([   0.,   14.,   44.,   71.,   94.,  130.,  157.,  190.,  226.,
-                          269.,  310.,  352.,  385.,  397.,  445.,  496.,  550.,  607.,
-                          651.,  662.,  726.,  783.,  799.,  871.,  947., 1023.])
-hspace_template = np.array([89, 134, 125, 124, 103, 100, 120, 110, 97, 111, 81, 114, 
-                            86, 85, 106, 110, 111, 107, 78, 94, 75, 71, 99, 99, 97, 90])
 
 def line_line_intersection(riti, rjtj):
     return np.array([
@@ -29,14 +26,46 @@ def rotate_image(image, image_center, angle):
   result = cv2.warpAffine(image, rot_mat, image.shape[1::-1], flags=cv2.INTER_LINEAR)
   return result, rot_mat
 
-def draw_line(image, rho, theta, color=(0,0,255)):
+def rotate_line_pair(angle, rot_mat, line_pair):
+    '''
+    angle: rad
+    rot_mat: the 2 * 3 transformation
+    line_pair: [h, r1, t1, r2, t2]
+    '''
+    m = -rot_mat [:, :2].T @ rot_mat [:, 2]
+    line_pair[1] = -(np.cos(line_pair[2]) * m[0] + np.sin(line_pair[2]) * m[1] - line_pair[1])
+    line_pair[3] = -(np.cos(line_pair[4]) * m[0] + np.sin(line_pair[4]) * m[1] - line_pair[3])
+
+    line_pair[2] = line_pair[2] - angle
+    line_pair[4] = line_pair[4] - angle
+    return line_pair
+
+def draw_line(image, rho, theta, **kwargs):
     a = np.cos(theta)
     b = np.sin(theta)
     x0 = a * rho
     y0 = b * rho
     pt1 = (int(x0 + 2000*(-b)), int(y0 + 2000*(a)))
     pt2 = (int(x0 - 2000*(-b)), int(y0 - 2000*(a)))
-    cv2.line(image, pt1, pt2, color, 1, cv2.LINE_AA)
+    if 'thickness' in kwargs:
+        thickness = kwargs['thickness']
+    else:
+        thickness = 1        
+    cv2.line(image, pt1, pt2, (0, 255, 0), thickness, cv2.LINE_AA)
+
+def cornerpoints_from_line_pair(linepair, width):
+    w = width
+    r1 = linepair[1]
+    t1 = linepair[2]
+    r2 = linepair[3]
+    t2 = linepair[4]
+    cornerpoints = np.array([[
+        [0, int(r1/np.sin(t1))],
+        [w, int((r1-w*np.cos(t1))/np.sin(t1))],
+        [w, int((r2-w*np.cos(t2))/np.sin(t2))],
+        [0, int(r2/np.sin(t2))]
+    ]])
+    return cornerpoints
 
 def parallel_lines_detection(edges, theta_tol=5, rho_tol=100, is_visualize=False):
     '''
@@ -65,38 +94,25 @@ def parallel_lines_detection(edges, theta_tol=5, rho_tol=100, is_visualize=False
 
 def rotate_fretboard(frame, filtered_parallel_lines):
     fretboard_linepair = filtered_parallel_lines[0]
-    w = frame.shape[1]
-    r1 = fretboard_linepair[1]
-    t1 = fretboard_linepair[2]
-    r2 = fretboard_linepair[3]
-    t2 = fretboard_linepair[4]
-    cornerpoints = np.array([[
-        [0, int(r1/np.sin(t1))],
-        [w, int((r1-w*np.cos(t1))/np.sin(t1))],
-        [0, int(r2/np.sin(t2))],
-        [w, int((r2-w*np.cos(t2))/np.sin(t2))]
-    ]])
+    cornerpoints = cornerpoints_from_line_pair(fretboard_linepair, frame.shape[1])
 
     rect = cv2.minAreaRect(cornerpoints) # (x-coordinate, y-coordinate),(width, height), rotation)
     if rect[1][1] > rect[1][0]:
-        rotated, rot_mat = rotate_image(frame, rect[0], -(90-rect[2]))
-        rotated = rotated[max(int(rect[0][1]-0.6*rect[1][0]), 0):int(rect[0][1]+0.6*rect[1][0]), :]
-        # if int(rect[0][1]-0.6*rect[1][0]) < 0:
-            # tmp = np.array([rect[0][0], rect[0][1]]) + rot_mat [:, :2].T @ np.array([-0.5*rect[1][1], -rect[0][1]])
-        # else:
-            # tmp = np.array([rect[0][0], rect[0][1]]) + rot_mat [:, :2].T @ np.array([-0.5*rect[1][1], -0.6*rect[1][0]])
-        # filtered_parallel_lines[0][1] = abs(np.cos(t1) * tmp[0] + np.sin(t1) * tmp[1] - r1)
-        # filtered_parallel_lines[0][2] = filtered_parallel_lines[0][2] +(90-rect[2])/180*np.pi
-        # filtered_parallel_lines[0][3] = abs(np.cos(t2) * tmp[0] + np.sin(t2) * tmp[1] - r2)
-        # filtered_parallel_lines[0][4] = filtered_parallel_lines[0][4] +(90-rect[2])/180*np.pi
+        angle = -(90-rect[2])
+        rotated, rot_mat = rotate_image(frame, rect[0], angle)
+        filtered_parallel_lines[0] = rotate_line_pair(angle/180*np.pi, rot_mat, fretboard_linepair)
+
+        y0 = max(int(rect[0][1]-0.6*rect[1][0]), 0)
+        rotated = rotated[y0:int(rect[0][1]+0.6*rect[1][0]), :]
     else:
-        rotated, rot_mat = rotate_image(frame, rect[0], rect[2])
-        rotated = rotated[max(int(rect[0][1]-0.6*rect[1][1]), 0):int(rect[0][1]+0.6*rect[1][1]), :]
-        # tmp = np.array([rect[0][0], rect[0][1]]) + rot_mat [:, :2].T @ np.array([-0.5*rect[1][0], -0.6*rect[1][1], 0])
-        # filtered_parallel_lines[0][1] = abs(np.cos(t1) * tmp[0] + np.sin(t1) * tmp[1] - r1)
-        # filtered_parallel_lines[0][2] = filtered_parallel_lines[0][2] - rect[2]/180*np.pi
-        # filtered_parallel_lines[0][3] = abs(np.cos(t2) * tmp[0] + np.sin(t2) * tmp[1] - r2)
-        # filtered_parallel_lines[0][4] = filtered_parallel_lines[0][4] - rect[2]/180*np.pi
+        angle = rect[2]
+        rotated, rot_mat = rotate_image(frame, rect[0], angle)
+        filtered_parallel_lines[0] = rotate_line_pair(angle/180*np.pi, rot_mat, fretboard_linepair)
+
+        y0 = max(int(rect[0][1]-0.6*rect[1][1]), 0)
+        rotated = rotated[y0:int(rect[0][1]+0.6*rect[1][1]), :]
+    filtered_parallel_lines[0][1] = filtered_parallel_lines[0][1] - y0 * np.cos(np.pi/2 - filtered_parallel_lines[0][2])
+    filtered_parallel_lines[0][3] = filtered_parallel_lines[0][3] - y0 * np.cos(np.pi/2 - filtered_parallel_lines[0][4])
     return rotated, filtered_parallel_lines
 
 def find_undistort_transform(rotated_edges, is_visualize=False):
@@ -132,49 +148,168 @@ def find_undistort_transform(rotated_edges, is_visualize=False):
         return homography, cdst, (hspace, angles, dists)
     return homography, None, (hspace, angles, dists)
 
-def locate_fretboard(rotated_frame, rotated_edges, threshold=0.6):
-    filtered_parallel_lines, cdst = parallel_lines_detection(rotated_edges, theta_tol=5, rho_tol=100, is_visualize=True)
-    # cdst2 = cv2.cvtColor(rotated_edges.copy(), cv2.COLOR_GRAY2BGR)
-    # cv2.imshow('cdst', cdst)        
+def locate_fretboard(rotated_frame, rotated_edges, filtered_parallel_lines):
+    # cdst = cv2.cvtColor(rotated_edges.copy(), cv2.COLOR_GRAY2BGR)
+    # draw_line(cdst, filtered_parallel_lines[0][1], filtered_parallel_lines[0][2])
+    # draw_line(cdst, filtered_parallel_lines[0][3], filtered_parallel_lines[0][4])
 
     h, theta, d = hough_line(rotated_edges, theta=np.array([0.0]))
-    hspace, angles, dists = hough_line_peaks(h, theta, d, min_distance=9, min_angle=10)
+    hspace, angles, dists = hough_line_peaks(h, theta, d, min_distance=3, min_angle=1)
 
     hspace, angles, dists = (list(item) for item in zip(*sorted(zip(hspace, angles, dists), key=lambda x: x[2])))
 
+    # first stage filter
+    hspace = np.array(hspace).astype(float)
+    dists = np.array(dists)
+    while np.sum(np.diff(hspace) < -10) > 0:
+        idxes = np.concatenate(([0], np.argwhere(np.diff(hspace) > -10).squeeze() + 1))
+        hspace = hspace[idxes]
+        dists = dists[idxes]
+    
+    # second stage filter (merge closely spaced lines)
+    idxes = np.argwhere(np.diff(dists) < 10).squeeze()
+    dists[idxes] = (dists[idxes] + dists[idxes+1]) / 2
+    hspace[idxes] = (hspace[idxes] + hspace[idxes+1]) / 2
+    dists = np.delete(dists, idxes+1)
+    hspace = np.delete(hspace, idxes+1)
+
+    # third stage filter
+    fret_dists = np.diff(dists)
+    fret_second_order_difference_normalized = np.diff(np.diff(fret_dists)) / fret_dists[1:-1]
+    outliers_idx = np.argwhere(fret_second_order_difference_normalized[5:] > 1) + 5 + 1
+    if outliers_idx is not None:
+        # for outlier in list(outliers_idx):
+        #     cv2.rectangle(cdst, (int(dists[outlier[0]]), 0), (int(dists[outlier[0]])+20, 20), (255, 255, 0), -1) 
+        outliers_idx = outliers_idx.squeeze()
+        dists = np.delete(dists, outliers_idx)
+        hspace = np.delete(hspace, outliers_idx)
+
+    for dist in dists:
+        draw_line(cdst, dist, 0)
+
+    # cv2.namedWindow("cdst")
+    # def mouse_callback(event, x, y, flags, param):
+    #     idx = np.argmin(np.abs(np.array(dists) - x))
+    #     cdst2 = cdst.copy()
+    #     if abs(dists[idx] - x ) < 5:
+    #         draw_line(cdst2, dists[idx], 0, thickness=3)
+    #         cv2.putText(cdst2, f'{hspace[idx]}', (10, 100), cv2.FONT_HERSHEY_PLAIN, 2, (0, 0, 255))
+    #     cv2.imshow('cdst', cdst2)
+    # cv2.setMouseCallback("cdst", mouse_callback)
+
     rois = []
-    for ri, rj in zip(dists[0:-1], dists[1:]):
+    features = np.zeros((dists.shape[0]-1, 1))
+    for i, (ri, rj) in enumerate(zip(dists[0:-1], dists[1:])):
         point1 = line_line_intersection_fast(filtered_parallel_lines[0][1:3], rj)
         point2 = line_line_intersection_fast(filtered_parallel_lines[0][3:], rj)
 
         rect = [int(ri), int(point1[1]), int(rj)-int(ri), int(point2[1])-int(point1[1])] # [x y w h]
         rois.append(rect)
         # cv2.imshow('debug', rotated_frame[rect[1]:rect[1]+rect[3], rect[0]:rect[0]+rect[2]])
+        # histr = cv2.calcHist([rotated_frame[rect[1]:rect[1]+rect[3], rect[0]:rect[0]+rect[2]]], [0], None, [256], [0,255])
+        # features[i, :] = histr.reshape((-1,))
+        features[i, 0] = np.mean([rotated_frame[rect[1]:rect[1]+rect[3], rect[0]:rect[0]+rect[2]]])
+
         # cv2.waitKey()
-    rois = np.array(rois)
-    second_order_difference = np.abs(np.diff(np.diff(rois[:, 2])))
-    mask = second_order_difference / rois[1:-1, 2] <= threshold
-    idxes = np.argwhere(mask).squeeze() + 1
+        # plt.figure()
+        # plt.plot(histr)
+        # plt.show()
+    
+    second_order_difference = np.diff(np.diff(features.reshape((-1,))))
 
-    average_intensity = np.zeros((rois.shape[0]))
-    for i in range(rois.shape[0]):
-        rect = rois[i, :]
-        average_intensity[i] = np.sum(rotated_frame[rect[1]:rect[1]+rect[3], rect[0]:rect[0]+rect[2]]) / rect[2] / rect[3]
+    kernel_12 = np.array([-1, -1, 1, -1, -1])
+    idx_12 = np.argmin(np.convolve(second_order_difference, kernel_12, 'valid')) + 2 + 1
 
-    diff_average_intensity = np.diff(average_intensity[idxes]) / average_intensity[idxes][:-1]
-    print(diff_average_intensity)
-    average_intensity_idxes = idxes[np.argwhere(diff_average_intensity>=0.1).squeeze()+1]
-    for i in average_intensity_idxes:
-        draw_line(cdst, rois[i, 0], 0)
-        cv2.putText(cdst, f'{i}', (rois[i, 0], rois[i, 1]), cv2.FONT_HERSHEY_PLAIN, 2, (0, 0, 255))
-    for dist in rois[np.argwhere(np.invert(mask)).squeeze() + 1, 0]:
-        draw_line(cdst, dist, 0, color=(0, 255, 0))
-    cv2.imshow('cdst', cdst)    
+    kernel_quadruplets = np.array([-1, 1, -1, 1, -1, 1, -1, 1, -1])
+    if len(second_order_difference) < 2 * len(kernel_quadruplets):
+        idx_quadruplets = np.array([idx_12, idx_12])
+    else:
+        convolve = np.convolve(second_order_difference, kernel_quadruplets, 'valid')
+        smallest_idx = np.argmin(convolve)
+        mask_idxes = [max(smallest_idx-4, 0), min(smallest_idx+4, len(convolve))]
+        convolve[mask_idxes[0]:mask_idxes[1]] = np.max(convolve)
+        second_smallest_idx = np.argmin(convolve)
+
+        idx_quadruplets = np.array([smallest_idx, second_smallest_idx]) + 4 + 1
+
+    # vailidation
+    is_located = False
+    if np.abs(idx_quadruplets[0] - idx_12) == 6 and np.abs(idx_quadruplets[1] - idx_12) == 6:
+        is_located = True
+        idx_high = np.max(idx_quadruplets)
+        idx_low = np.min(idx_quadruplets)
+        fret_idx = np.array([
+            idx_high+3, idx_high+1, idx_high-1, idx_high-3,
+            idx_12,
+            idx_low+3, idx_low+1, idx_low-1, idx_low-3
+        ])
+        # for idx in fret_idx:
+        #     cv2.rectangle(cdst, (int(dists[idx]), 0), (int(dists[idx+1]), 20), (0, 0, 255), -1)
+        # cv2.imshow('cdst', cdst)
+    else:
+        fret_idx = None
+        # cv2.rectangle(cdst, (int(dists[idx_12]), 0), (int(dists[idx_12])+20, 20), (255, 255, 255), -1)
+        # if idx_quadruplets[0] <=len(dists) and idx_quadruplets[1] <=len(dists):
+        #     cv2.rectangle(cdst, (int(dists[idx_quadruplets[0]]), 0), (int(dists[idx_quadruplets[0]])+20, 20), (255, 255, 255), -1)
+        #     cv2.rectangle(cdst, (int(dists[idx_quadruplets[1]]), 0), (int(dists[idx_quadruplets[1]])+20, 20), (255, 255, 255), -1)
+
+    # template_1 = cv2.cvtColor(cv2.imread('test\\template_1.jpg'), cv2.COLOR_BGR2GRAY)
+    # feature1 = cv2.calcHist([template_1], [0], None, [256], [0,255])
+    # cv2.normalize(feature1, feature1, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+    # template_2 = cv2.cvtColor(cv2.imread('test\\template_2.jpg'), cv2.COLOR_BGR2GRAY)
+    # feature2 = cv2.calcHist([template_2], [0], None, [256], [0,255])
+    # cv2.normalize(feature2, feature2, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+    # template_n1 = cv2.cvtColor(cv2.imread('test\\template_n1.jpg'), cv2.COLOR_BGR2GRAY)
+    # featuren1 = cv2.calcHist([template_n1], [0], None, [256], [0,255])
+    # cv2.normalize(featuren1, featuren1, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+    # template_n2 = cv2.cvtColor(cv2.imread('test\\template_n2.jpg'), cv2.COLOR_BGR2GRAY)
+    # featuren2 = cv2.calcHist([template_n2], [0], None, [256], [0,255])
+    # cv2.normalize(featuren2, featuren2, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+    # for i in range(len(dists)-1):
+    #     rect = rois[i]
+        # cv2.putText(cdst, f'{np.mean([rotated_frame[rect[1]:rect[1]+rect[3], rect[0]:rect[0]+rect[2]]]):.0f}', (int(dists[i]), 100), cv2.FONT_HERSHEY_PLAIN, 1, (0, 0, 255))
+        # cv2.putText(cdst, f'{np.std([rotated_frame[rect[1]:rect[1]+rect[3], rect[0]:rect[0]+rect[2]]]):.0f}', (int(dists[i]), 50), cv2.FONT_HERSHEY_PLAIN, 1, (0, 0, 255))
+        # cv2.normalize(features[i, :], features[i, :], alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+        # metric_1 = cv2.compareHist(feature1.reshape((-1,)), features[i, :].astype('float32'), cv2.HISTCMP_CORREL)
+        # metric_2 = cv2.compareHist(feature2.reshape((-1,)), features[i, :].astype('float32'), cv2.HISTCMP_CORREL)
+        # metric_n1 = cv2.compareHist(featuren1.reshape((-1,)), features[i, :].astype('float32'), cv2.HISTCMP_CORREL)
+        # metric_n2 = cv2.compareHist(featuren2.reshape((-1,)), features[i, :].astype('float32'), cv2.HISTCMP_CORREL)
+        # plt.figure()
+        # plt.plot(feature1)
+        # plt.plot(feature2)
+        # plt.plot(featuren1)
+        # plt.plot(featuren2)
+        # plt.plot(features[i, :])
+        # plt.legend(['feature1', 'feature2', 'featuren1', 'featuren2', 'real'])
+        # plt.show()
+        # if max(metric_1, metric_2) > max(metric_n1, metric_n2):
+        #     cv2.rectangle(cdst, (int(dists[i]), 0), (int(dists[i])+20, 20), (255, 0, 0), -1) 
+        # else:
+        #     cv2.rectangle(cdst, (int(dists[i]), 0), (int(dists[i])+20, 20), (0, 0, 255), -1) 
+
+    # distance_matrix = squareform(pdist(features))
+    # affinity_matrix = 1 - distance_matrix / np.max(distance_matrix)
+    # rois = np.array(rois)
+    # clustering = SpectralClustering(n_clusters=3,
+    #     assign_labels='discretize',
+    #     random_state=0,
+    #     affinity='precomputed').fit(affinity_matrix)
+    # for i in range(len(clustering.labels_)):
+    #     if clustering.labels_[i]:
+    #         cv2.rectangle(cdst, (int(dists[i]), 0), (int(dists[i])+20, 20), (255, 0, 0), -1) 
+    #     else:
+    #         cv2.rectangle(cdst, (int(dists[i]), 0), (int(dists[i])+20, 20), (0, 0, 255), -1) 
+    # cv2.imshow('cdst', cdst)
+
+    if is_located:
+        return rotated_frame[:, int(dists[fret_idx[-1]-1]):int(dists[fret_idx[0]+2])], dists[fret_idx]
+    else:
+        return None, None
 
 if __name__ == '__main__':
-    frame_number = 500
     cap = cv2.VideoCapture('test\\guitar2.mp4')
 
+    template = None
     counter = 1
     while True:
         ret, frame = cap.read()
@@ -194,28 +329,33 @@ if __name__ == '__main__':
 
         filtered_parallel_lines, cdst = parallel_lines_detection(edges, theta_tol=5, rho_tol=100, is_visualize=False)
 
-        rotated_frame, _ = rotate_fretboard(frame, filtered_parallel_lines)
+        rotated_frame, filtered_parallel_lines = rotate_fretboard(frame, filtered_parallel_lines)
 
-        rotated_frame = cv2.equalizeHist(rotated_frame)
+        cornerpoints = cornerpoints_from_line_pair(filtered_parallel_lines[0], rotated_frame.shape[1])
+        mask = np.zeros_like(rotated_frame)
+        cv2.fillPoly(mask, pts=[cornerpoints], color=(255, 255, 255))
+        rotated_frame = cv2.bitwise_and(rotated_frame, mask)
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        rotated_frame = clahe.apply(rotated_frame)
+        # rotated_frame = cv2.equalizeHist(rotated_frame)
 
         rotated_edges = cv2.Canny(rotated_frame, 50, 150, 5)
-
-        # Second stage: fret detection
-        homography, cdst, _ = find_undistort_transform(rotated_edges, is_visualize=False)
-        # cv2.imshow('fret detection', cdst)
-
-        # # test = rotated_frame.copy()
-        # test = cv2.warpPerspective(rotated_frame.copy(), homography, rotated_frame.shape[1::-1], flags=cv2.INTER_LINEAR)
-        # # test = cv2.copyMakeBorder(test, 200, 200, 200, 200, cv2.BORDER_CONSTANT)
         
-        # template = cv2.imread('test\\template.jpg')
-        # template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-        # # template = cv2.resize(template, (0, 0), fx = 1, fy = 1)
-        # # cv2.imshow('match', res / np.max(res))
+        # Second stage: fret detection
+        homography, cdst, fret_lines = find_undistort_transform(rotated_edges, is_visualize=False)
+        # cv2.imshow('fret detection', cdst)
         
         rotated_frame = cv2.warpPerspective(rotated_frame, homography, rotated_frame.shape[1::-1], flags=cv2.INTER_LINEAR)
+        # draw_line(rotated_frame, filtered_parallel_lines[0][1], filtered_parallel_lines[0][2])
+        # draw_line(rotated_frame, filtered_parallel_lines[0][3], filtered_parallel_lines[0][4])
+        # cv2.imshow('rotated_frame', rotated_frame)
+
         rotated_edges = cv2.warpPerspective(rotated_edges, homography, rotated_edges.shape[1::-1], flags=cv2.INTER_LINEAR)
-        locate_fretboard(rotated_frame, rotated_edges)
+        if template is None:
+            template, template_fretlines = locate_fretboard(rotated_frame, rotated_edges, filtered_parallel_lines)
+        if template is not None:
+            cv2.imshow('', template)
 
         # tol = 0.20
         # dists.sort()

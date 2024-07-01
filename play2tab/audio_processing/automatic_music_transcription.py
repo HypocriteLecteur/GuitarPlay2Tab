@@ -2,6 +2,7 @@ import librosa
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.io.wavfile import write
+import configparser
 
 def estimate_pitch(segment, sr, fmin=librosa.note_to_hz('C3'), fmax=librosa.note_to_hz('C6')):
     
@@ -44,10 +45,10 @@ def harmonic_summation(log_cqt, bins_per_octave, harmonic_degree):
 
     return log_cqt_harmonic_sum
 
-def extract_melody(log_cqt):
+def extract_melody(log_cqt, threshold=0):
     melody_spectrogram = np.ones_like(log_cqt) * np.min(log_cqt)
     max_idxes = np.argmax(log_cqt, axis=0)
-    _idxes = log_cqt[max_idxes, np.arange(len(max_idxes))] > 0
+    _idxes = log_cqt[max_idxes, np.arange(len(max_idxes))] > threshold
     max_idxes = max_idxes[_idxes]
     valid_idxes = np.arange(log_cqt.shape[1])[_idxes]
     melody_spectrogram[max_idxes, valid_idxes] = log_cqt[max_idxes, valid_idxes]
@@ -56,6 +57,21 @@ def extract_melody(log_cqt):
 def spectrogram_idx_to_frequency(idx):
     return 2**((24+idx-69)/12)*440
 
+def calculate_spectrogram(x, sr, cfg, display=False, axis=None):
+    spectrogram = cfg['Spectrogram']
+    cqt = librosa.cqt(x, sr=sr, hop_length=spectrogram.getint('hop_length'), 
+                      fmin=librosa.note_to_hz(spectrogram['note_min']),
+                      n_bins=spectrogram.getint('n_bins'), 
+                      bins_per_octave=spectrogram.getint('bins_per_octave'))
+    log_cqt = librosa.amplitude_to_db(cqt)
+
+    if display:
+        librosa.display.specshow(log_cqt, sr=sr, x_axis='time', y_axis='cqt_note', 
+                                hop_length=spectrogram.getfloat('hop_length'),
+                                fmin=librosa.note_to_hz(spectrogram['note_min']),
+                                bins_per_octave=spectrogram.getint('bins_per_octave'), ax=axis)
+
+    return log_cqt
 
 if __name__ == '__main__':
     filename = 'test\\test.wav'
@@ -64,23 +80,25 @@ if __name__ == '__main__':
     # librosa.display.waveshow(x, sr=sr)
     # plt.show()
 
-    hop_length = 200
-    bins_per_octave = 12
-    cqt = librosa.cqt(x, sr=sr, hop_length=hop_length, n_bins=12*8, bins_per_octave=bins_per_octave)
-    log_cqt = librosa.amplitude_to_db(cqt)
+    cfg = configparser.ConfigParser()
+    cfg.read('.\\play2tab\\audio_processing\\config.ini')
 
-    # harmonic summation
-    harmonic_degree = 3
-    log_cqt_harmonic_sum = harmonic_summation(log_cqt, bins_per_octave, harmonic_degree)
-
-    melody_spectrogram, melody_idxes = extract_melody(log_cqt)
+    cfg.getint('Spectrogram', 'n_bins')
 
     f, (ax1, ax2) = plt.subplots(1, 2)
-    librosa.display.specshow(log_cqt, sr=sr, x_axis='time', y_axis='cqt_note', hop_length=hop_length,
-                             bins_per_octave=bins_per_octave, ax=ax1)
-    librosa.display.specshow(melody_spectrogram, sr=sr, x_axis='time', y_axis='cqt_note', hop_length=hop_length,
-                             bins_per_octave=bins_per_octave, ax=ax2)
-    # plt.show()
+
+    log_cqt = calculate_spectrogram(x, sr, cfg, display=True, axis=ax1)
+
+
+    # harmonic summation
+    # harmonic_degree = 3
+    # log_cqt_harmonic_sum = harmonic_summation(log_cqt, bins_per_octave, harmonic_degree)
+
+    # melody_spectrogram, melody_idxes = extract_melody(log_cqt, threshold=0)
+
+    # librosa.display.specshow(melody_spectrogram, sr=sr, x_axis='time', y_axis='cqt_note', hop_length=hop_length,
+    #                          bins_per_octave=bins_per_octave, ax=ax2)
+    plt.show()
 
     # pitches, magnitudes = librosa.piptrack(S=log_cqt, sr=sr, threshold=1,
     #                                    ref=np.mean)
@@ -92,35 +110,35 @@ if __name__ == '__main__':
     # librosa.display.specshow(chromagram, y_axis='chroma', x_axis='time')
     # plt.show()
 
-    hop_length = 50
-    onset_samples = librosa.onset.onset_detect(y=x,
-                                            sr=sr, units='samples', 
-                                            hop_length=hop_length, 
-                                            backtrack=True,
-                                            pre_max=20,
-                                            post_max=20,
-                                            pre_avg=100,
-                                            post_avg=100,
-                                            delta=0.1,
-                                            wait=0)
-    onset_boundaries = np.concatenate([[0], onset_samples, [len(x)]])
-    onset_times = librosa.samples_to_time(onset_boundaries, sr=sr)
+    # hop_length = 50
+    # onset_samples = librosa.onset.onset_detect(y=x,
+    #                                         sr=sr, units='samples', 
+    #                                         hop_length=hop_length, 
+    #                                         backtrack=True,
+    #                                         pre_max=20,
+    #                                         post_max=20,
+    #                                         pre_avg=100,
+    #                                         post_avg=100,
+    #                                         delta=0.1,
+    #                                         wait=0)
+    # onset_boundaries = np.concatenate([[0], onset_samples, [len(x)]])
+    # onset_times = librosa.samples_to_time(onset_boundaries, sr=sr)
 
-    for onset_time in onset_times:
-        plt.axvline(x=onset_time, color='r')
-    plt.show()
+    # for onset_time in onset_times:
+    #     plt.axvline(x=onset_time, color='r')
+    # plt.show()
 
     # tempo, beats = librosa.beat.beat_track(y=x, sr=sr, hop_length=200)
     # print("Tempo 1:", tempo)
 
     # pitch estimation
-    y = np.array([])
-    for i in range(len(onset_boundaries)-1):
-        n0 = int(onset_boundaries[i] / 200)
-        n1 = int(onset_boundaries[i+1] / 200)
-        midi = np.median(np.argmax(melody_spectrogram[:, melody_idxes[np.where(np.logical_and(melody_idxes >= n0 , melody_idxes <= n1))]], axis=0))
-        if not np.isnan(midi):
-            y = np.concatenate((y, generate_sine(spectrogram_idx_to_frequency(midi), sr, (n1-n0)*200)))
+    # y = np.array([])
+    # for i in range(len(onset_boundaries)-1):
+    #     n0 = int(onset_boundaries[i] / 200)
+    #     n1 = int(onset_boundaries[i+1] / 200)
+    #     midi = np.median(np.argmax(melody_spectrogram[:, melody_idxes[np.where(np.logical_and(melody_idxes >= n0 , melody_idxes <= n1))]], axis=0))
+    #     if not np.isnan(midi):
+    #         y = np.concatenate((y, generate_sine(spectrogram_idx_to_frequency(midi), sr, (n1-n0)*200)))
             # print(librosa.hz_to_note(spectrogram_idx_to_frequency(midi)))
 
     
@@ -129,10 +147,7 @@ if __name__ == '__main__':
     #     for i in range(len(onset_boundaries)-1)
     # ])
 
-    write('test/output.wav', sr, y)
-
-    # cqt = librosa.cqt(y, sr=sr)
-    # librosa.display.specshow(abs(cqt), sr=sr, x_axis='time', y_axis='cqt_note')
+    # write('test/output.wav', sr, y)
 
     # plt.plot(onset_env)
     # plt.xlim(0, len(onset_env))
