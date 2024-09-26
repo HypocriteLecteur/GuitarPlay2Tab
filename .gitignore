@@ -3,3 +3,5 @@ test/tab_pages/output
 __pycache__/
 *.pyc
 test/guitar.mp4
+debug/*
+/test
