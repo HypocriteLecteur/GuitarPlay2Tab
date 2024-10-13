@@ -40,8 +40,9 @@ class FretboardDetector:
         if not self.is_initialized:
             self.is_initialized, self.fretboard = self.detector.detect(frame)
 
-            frame_bg = mask_out_oriented_bb(frame, self.fretboard.oriented_bb)
-            self.backSub.apply(frame_bg)
+            if self.is_initialized:
+                frame_bg = mask_out_oriented_bb(frame, self.fretboard.oriented_bb)
+                self.backSub.apply(frame_bg)
             
             cv2.waitKey(1)
             cv2.destroyAllWindows()
@@ -49,13 +50,13 @@ class FretboardDetector:
         else:
             fgmask = self.backSub.apply(frame, None, learningRate=0)
 
-            is_tracked, self.fretboard = self.tracker.track(frame, fgmask, self.fretboard)
-            if not is_tracked:
-                self.is_initialized = self.detector.detect(frame)
+            self.is_initialized, self.fretboard = self.tracker.track(frame, fgmask, self.fretboard)
+            if not self.is_initialized:
+                self.is_initialized, self.fretboard = self.detector.detect(frame) 
             
-            frame_bg = mask_out_oriented_bb(frame, self.fretboard.oriented_bb)
-
-            self.backSub.apply(frame_bg, None, learningRate=-1)
+            if self.is_initialized:
+                frame_bg = mask_out_oriented_bb(frame, self.fretboard.oriented_bb)
+                self.backSub.apply(frame_bg, None, learningRate=-1)
             # cv2.imshow('bg_model', self.backSub.getBackgroundImage())
             cv2.waitKey(1)
 
@@ -63,8 +64,9 @@ class FretboardDetector:
             # self.videoplayback.imshow()
         
         final_cdst = frame.copy()
-        draw_fretboard(final_cdst, self.fretboard)
-        cv2.putText(final_cdst, f'{self.counter}', (10, 10), cv2.FONT_HERSHEY_PLAIN, 2, (0, 0, 255))
+        if self.fretboard is not None:
+            draw_fretboard(final_cdst, self.fretboard)
+        cv2.putText(final_cdst, f'{self.counter}', (30, 30), cv2.FONT_HERSHEY_PLAIN, 2, (0, 0, 255))
 
         self.video.write(final_cdst)
         self.counter = self.counter + 1

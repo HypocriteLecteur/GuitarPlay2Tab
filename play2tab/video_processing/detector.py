@@ -25,7 +25,7 @@ class Detector(DetectorInterface):
 
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
 
-        self.string_template = cv2.cvtColor(cv2.imread('test\\string_template_2.png'), cv2.COLOR_BGR2GRAY)
+        self.string_template = cv2.cvtColor(cv2.imread('play2tab\\video_processing\\template\\string_template_2.png'), cv2.COLOR_BGR2GRAY)
 
         self.fretboard = None
 
@@ -43,7 +43,7 @@ class Detector(DetectorInterface):
                                      is_visualize=False) \
             -> Tuple[Union[NDArray, None], Union[MatLike, None]]:
         '''
-        fingerboard_lines = [[r1, t1, h1], [r2, t2, h2]]
+        Detect near-parallel line pair that is the farthest apart.
         '''
         lines = cv2.HoughLines(edges, 1, np.pi / 180, houghline_thres, None, 0, 0)
 
@@ -85,6 +85,9 @@ class Detector(DetectorInterface):
     
     def find_rectification(self, cropped_edges: MatLike, theta_range=10/180*np.pi, is_visualize=False) \
             -> Tuple[NDArray, NDArray, Union[MatLike, None]]:
+        '''
+        Detect vertical frets and rectify.
+        '''
         tested_angles = np.linspace(-theta_range, theta_range, 10, endpoint=False)
         h, theta, d = hough_line(cropped_edges, theta=tested_angles)
         hspace, angles, dists = hough_line_peaks(h, theta, d, min_distance=9, min_angle=10)
@@ -94,18 +97,7 @@ class Detector(DetectorInterface):
         # sort by dist
         # hspace, angles, dists = (list(item) for item in zip(*sorted(zip(hspace, angles, dists), key=lambda x: x[1])))
         
-        h = cropped_edges.shape[0]
-        src_pts = np.zeros((2*dists.size, 2))
-        dst_pts = np.zeros((2*dists.size, 2))
-
-        dst_pts[:, 0] = np.repeat(utils.houghlines_x_from_y(frets, 0), 2)
-        dst_pts[1::2, 1] = h
-
-        src_pts[0:-1:2, 0] = dst_pts[0:-1:2, 0]
-        src_pts[1::2, 0] = utils.houghlines_x_from_y(frets, h)
-        src_pts[1::2, 1] = h
-
-        homography, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC,5.0)
+        homography = utils.find_affine_rectification(frets, cropped_edges.shape)
         if homography is None:
             return None, None, None
 
@@ -124,13 +116,12 @@ class Detector(DetectorInterface):
                          is_visualize=False) \
             -> Tuple[bool, Union[NDArray, None]]:
         '''
-        Locate Frets Pipeline:
         1. Detect vertical lines
         2. Merge closely spaced lines
         3. Delete fretline outliers by calculating second order difference
 
-        Note: One can also use the detection results in find_rectification, but for locating thick frets, skeletonization
-        is better than canny.
+        Note: One can also use the detection results from find_rectification, but for locating thick frets, skeletonization
+        works better than canny.
         '''
         thresh = cv2.adaptiveThreshold(rect_gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C , cv2.THRESH_BINARY, 11, 0)
         edges = skeletonize(thresh).astype("uint8") * 255
@@ -215,7 +206,6 @@ class Detector(DetectorInterface):
                        is_visualize=True) \
             -> Tuple[bool, Union[NDArray, None]]:
         '''
-        Locate Strings Pipeline:
         1. Template matching
         2. Edge detection for matching response map (remember theres an offset)
         3. HoughlinesP and merge similar lines
@@ -282,7 +272,7 @@ class Detector(DetectorInterface):
         3. Fretboard boundary detection: Hough Transform -> parallel lines detection
         4. Crop image with padded rotated bounding-box
         5. Mask out the background and enhance contrast (Optional)
-        6. Affine Rectification, recover parallelism
+        6. Affine Rectification, recover vertical parallelism
         7. Locate frets
         8. Locate strings
         9. Prepare data for tracker
