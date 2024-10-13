@@ -1,7 +1,26 @@
 import cv2
 import numpy as np
 from skimage.transform import SimilarityTransform
+from numpy.random import default_rng
+from scipy.optimize import linear_sum_assignment
 from skimage.measure import ransac
+from sklearn.linear_model import RANSACRegressor, LinearRegression
+rng = default_rng()
+
+def find_features(dists, max_log_dist=7, num_bins=10):
+    tmp_matrix = dists - dists.reshape((-1, 1))
+    dist_matrix = np.sign(tmp_matrix) * np.log(np.abs(tmp_matrix))
+    bin_edges = np.linspace(-max_log_dist, max_log_dist, num_bins)
+
+    bin_indices = np.digitize(dist_matrix, bin_edges)
+    hist = np.array([np.bincount(bin_indice) for bin_indice in bin_indices])
+    return hist[:, 1:-1]
+
+def cost_matrix_for_features(template_features, des_features):
+    cost_matrix = np.zeros((template_features.shape[0], des_features.shape[0]))
+    for i in np.arange(cost_matrix.shape[0]):
+        cost_matrix[i, :] = np.sum((template_features[i, :] - des_features)**2 / np.maximum(1, template_features[i, :] + des_features), axis=1)
+    return cost_matrix
 
 def npprint(*data):
     with np.printoptions(precision=3, suppress=True):
@@ -33,14 +52,25 @@ def draw_line(image, rho, theta, **kwargs):
         color = (0, 255, 0)
     cv2.line(image, pt1, pt2, color, thickness, cv2.LINE_AA)
 
-def prepare_draw_fretboard(gray, tracked_fretlines, crop_transform):
+def prepare_draw_strings(width, tracked_strings, crop_transform):
+    lines = transform_houghlines(tracked_strings, np.linalg.inv(crop_transform))
+    pts1 = np.zeros_like(tracked_strings)
+    pts2 = np.zeros_like(tracked_strings)
+
+    pts1[:, 1] = lines[:, 0] / np.sin(lines[:, 1])
+
+    pts2[:, 0] = width
+    pts2[:, 1] = (lines[:, 0] - width * np.cos(lines[:, 1])) / np.sin(lines[:, 1])
+    return transform_points(pts1, np.linalg.inv(crop_transform)).astype(int), transform_points(pts2, np.linalg.inv(crop_transform)).astype(int)
+
+def prepare_draw_fretboard(height, tracked_fretlines, crop_transform):
     lines = transform_houghlines(tracked_fretlines, np.linalg.inv(crop_transform))
     pts1 = np.zeros_like(tracked_fretlines)
     pts2 = np.zeros_like(tracked_fretlines)
 
     pts1[:, 0] = lines[:, 0] / np.cos(lines[:, 1])
 
-    pts2[:, 1] = gray.shape[0]
+    pts2[:, 1] = height
     pts2[:, 0] = (lines[:, 0] - pts2[:, 1] * np.sin(lines[:, 1])) / np.cos(lines[:, 1])
     return transform_points(pts1, np.linalg.inv(crop_transform)).astype(int), transform_points(pts2, np.linalg.inv(crop_transform)).astype(int)
 
@@ -60,10 +90,8 @@ def second_order_difference(x1, x2, x3):
     return (x1 + x3 - 2*x2) / x2
 
 def line_line_intersection(riti, rjtj):
-    return np.linalg.inv(np.array([
-        [np.cos(riti[1]), np.sin(riti[1])],
-        [np.cos(rjtj[1]), np.sin(rjtj[1])]
-        ])) @ np.array([riti[0], rjtj[0]])
+    tmp = np.cross([np.cos(riti[1]), np.sin(riti[1]), -riti[0]], [np.cos(rjtj[1]), np.sin(rjtj[1]), -rjtj[0]])
+    return tmp[:2] / tmp[2]
 
 def line_line_intersection_fast(riti, rj):
     return np.linalg.inv(np.array([
@@ -121,28 +149,47 @@ class ColorThresholder:
         # Create HSV Image and threshold into a range.
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
         mask = cv2.inRange(hsv, lower, upper)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(9, 9))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_ERODE, kernel)
         self.output = cv2.bitwise_and(image, image, mask= mask)
 
         self.display = cv2.resize(self.output, (int(self.screensize[0]/4), int(self.screensize[1]/4)))
 
         cv2.imshow('color thresholder', self.display)
 
-def cornerpoints_from_line_pair(line_pair, width):
+def line_image_intersection(line, shape):
+    '''
+    line = [r, t]
+    shape = (height, width)
+    '''
+    if line[1] == 0:
+        return np.array([
+            [line[0], 0],
+            [line[0], shape[0]]
+        ]).astype(int)
+    elif line[1] == np.pi/2:
+        return np.array([
+            [0, line[0]],
+            [shape[1], line[0]]
+        ]).astype(int)
+    else:
+        four_intersection = np.array([
+            [0, line[0]/np.sin(line[1])],
+            [line[0]/np.cos(line[1]), 0],
+            [shape[1], (line[0] - shape[1]*np.cos(line[1])) / np.sin(line[1])],
+            [(line[0] - shape[0]*np.sin(line[1])) / np.cos(line[1]), shape[0]]
+        ]).astype(int)
+        valid_intersections = np.bitwise_and(four_intersection[:, 0] >= 0, four_intersection[:, 0] <= shape[1])
+        valid_intersections = np.bitwise_and(valid_intersections, four_intersection[:, 1] >= 0)
+        valid_intersections = np.bitwise_and(valid_intersections, four_intersection[:, 1] <= shape[0])
+        return four_intersection[valid_intersections, :]
+
+def cornerpoints_from_line_pair(line_pair, shape):
     '''
     line_pair = [[r1, t1], [r2, t2]]
+    shape = (height, width)
     '''
-    w = width
-    r1 = line_pair[0, 0]
-    t1 = line_pair[0, 1]
-    r2 = line_pair[1, 0]
-    t2 = line_pair[1, 1]
-    cornerpoints = np.array([[
-        [0, int(r1/np.sin(t1))],
-        [w, int((r1-w*np.cos(t1))/np.sin(t1))],
-        [w, int((r2-w*np.cos(t2))/np.sin(t2))],
-        [0, int(r2/np.sin(t2))]
-    ]])
-    return cornerpoints
+    return np.vstack((line_image_intersection(line_pair[0], shape), line_image_intersection(line_pair[1], shape)))
 
 def rotate_image(image, image_center, angle, custom_shape=None, additional_shift=None):
   rot_mat = cv2.getRotationMatrix2D(image_center, angle, 1.0)  # deg
@@ -193,7 +240,7 @@ def crop_from_oriented_bounding_box(frame, rect):
 
 def project_point_to_line(line_param, point):
     '''
-    line_param: [a, b], ax + by + 1 = 0
+    line_param: [a, b, c], ax + by + c = 0
     point: [x, y]
 
     the line can be parameterized as: p0 + t * v, where p0 is a point on the line, and
@@ -202,9 +249,12 @@ def project_point_to_line(line_param, point):
     after projecting the point on the line, we can solve for t:
         t = dot(point - p0, v) / norm(v)
     
-    we choose p0 = [0, -1/b], v = [-b, a]
+    we choose p0 = [0, -c/b], v = [-b, a]
     '''
-    return np.dot(point - [0, -1/line_param[1]], [-line_param[1], line_param[0]]) / np.linalg.norm(line_param)
+    return np.dot(point - [0, -line_param[2]/line_param[1]], [-line_param[1], line_param[0]]) / np.sqrt(line_param[0]**2 + line_param[1]**2)
+
+def project_points_to_line(line_param, pnts):
+    return ((pnts - [0, -line_param[2]/line_param[1]]) @ np.array([-line_param[1], line_param[0]])) / np.sqrt(line_param[0]**2 + line_param[1]**2)
 
 def point_distance_to_line(point, dist, angle):
     return dist - point[0] * np.cos(angle) - point[1] * np.sin(angle)
@@ -240,34 +290,129 @@ def transform_points(points, mat):
     points_transformed = points_transformed / points_transformed[2, :].reshape((1,-1))
     return points_transformed[:2, :].T
 
-# def find_homography_from_matched_fretlines(template_lines, des_lines):
-#     src_pts = np.zeros((template_lines.shape[0], 2))
-#     src_pts[:, 0] = -np.cos(template_lines[:, 1]) / template_lines[:, 0]
-#     src_pts[:, 1] = -np.sin(template_lines[:, 1]) / template_lines[:, 0]
+def homogeneous_coords_from_houghlines(lines):
+    return np.vstack((np.cos(lines[:, 1]), np.sin(lines[:, 1]), -lines[:, 0])).T
 
-#     dst_pts = np.zeros((des_lines.shape[0], 2))
-#     dst_pts[:, 0] = -np.cos(des_lines[:, 1]) / des_lines[:, 0]
-#     dst_pts[:, 1] = -np.sin(des_lines[:, 1]) / des_lines[:, 0]
+def vanishing_point_estimation(lines):
+    return np.linalg.lstsq(np.vstack((np.cos(lines[:, 1]), np.sin(lines[:, 1]))).T, lines[:, 0])
 
-#     homography, mask = cv2.findHomography(src_pts, dst_pts, 0,5.0)
-#     inliers = np.argwhere(mask[:, 0]).squeeze()
-#     return np.linalg.inv(homography), inliers
+def project_point_on_plane(n, p):
+    '''
+    orthogonal projection of a point on plane
+    p - dot(p, n) / ||n||^2 * n
+    '''
+    return p - np.dot(n, p) / np.dot(n, n) * n
+
+def project_points_on_plane(n, pnts):
+    '''
+    '''
+    return pnts - pnts @ n.reshape((-1, 1)) / np.dot(n, n) * n.reshape((1, -1))
+
+# def ransac_find_vanishing_point(lines):
+#     line_coords = homogeneous_coords_from_houghlines(lines)
+#     ransac_lm = RANSACRegressor(estimator=LinearRegression(fit_intercept=False))
+#     ransac_lm.fit(line_coords[:, :2], -line_coords[:, 2])
+#     vanishing_point = ransac_lm.estimator_.coef_
+#     # tmp = project_points_on_plane(np.hstack((des_vanishing_point, [1])), des_coords)
+#     # tmp = tmp / np.linalg.norm(tmp[:, :2], axis=1).reshape((-1, 1))
+#     return vanishing_point, ransac_lm.inlier_mask_
+
+class RANSAC:
+    def __init__(self, n=3, k=200, t=10, d=7, model=None):
+        self.n = n              # `n`: Minimum number of data points to estimate parameters
+        self.k = k              # `k`: Maximum iterations allowed
+        self.t = t              # `t`: Threshold value to determine if points are fit well
+        self.d = d              # `d`: Number of close data points required to assert model fits well
+        self.model = model      # `model`: class implementing `fit` and `predict`
+        self.best_fit = None
+        self.best_error = np.inf
+        self.best_inlier = None
+
+    def fit(self, X):
+        for _ in range(self.k):
+            ids = rng.permutation(X.shape[0])
+
+            maybe_inliers = ids[: self.n]
+            maybe_model = self.model.minial_fit(X[maybe_inliers])
+
+            thresholded = self.model.loss(maybe_model, X[ids][self.n :]) < self.t
+
+            inlier_ids = ids[self.n :][np.flatnonzero(thresholded).flatten()]
+
+            if inlier_ids.size > self.d:
+                inlier_points = np.hstack([maybe_inliers, inlier_ids])
+                better_model = self.model.ls_fit(X[inlier_points], y[inlier_points])
+
+                this_error = np.sum(self.model.loss(better_model, X[inlier_points]))
+                
+                if this_error < self.best_error:
+                    self.best_error = this_error
+                    self.best_fit = better_model
+                    tmp = np.zeros((X.shape[0],)).astype(bool)
+                    tmp[inlier_points] = True
+                    self.best_inlier = tmp
+        return self
+
+class VanishingPointEstimator:
+    def minial_fit(self, linesP):
+        return np.cross(linesP[:2], linesP[2:])
+    
+    def ls_fit(self, L, N):
+        return (vanishing_line_from_parallel_lines(L, N), L[0], N[0])
+    
+    def loss(self, vp, linesP):
+
+        return 
+
+def ransac_find_vanishing_point(linesP):
+
+    return vanishing_point, inlier_mask_
+
 
 def find_homography_from_matched_fretlines(template_lines, des_lines):
-    des_homography = find_projective_rectification(des_lines)
+    template_vanishing_point = vanishing_point_estimation(template_lines)[0]
+    # des_vanishing_point = vanishing_point_estimation(des_lines)[0]
 
-    des_lines_rect = transform_houghlines(des_lines, des_homography)
-    des_lines_rect[:, 1] = np.zeros((des_lines_rect.shape[0],))
+    des_coords = homogeneous_coords_from_houghlines(des_lines)
+    ransac_lm = RANSACRegressor(estimator=LinearRegression(fit_intercept=False))
+    ransac_lm.fit(des_coords[:, :2], -des_coords[:, 2])
+    des_vanishing_point = ransac_lm.estimator_.coef_
+    
+    tmp = project_points_on_plane(np.hstack((des_vanishing_point, [1])), des_coords)
+    tmp = tmp / np.linalg.norm(tmp[:, :2], axis=1).reshape((-1, 1))
+    return np.vstack((-tmp[:, 2], np.arctan2(tmp[:, 1], tmp[:, 0]))).T
 
-    template_homography = find_projective_rectification(template_lines)
+# def find_homography_from_matched_fretlines(template_lines, des_lines):
+#     des_homography = find_projective_rectification(des_lines)
 
-    template_homography_rect = transform_houghlines(template_lines, template_homography)
-    template_homography_rect[:, 1] = np.zeros((template_lines.shape[0],))
+#     des_lines_rect = transform_houghlines(des_lines, des_homography)
+#     des_features = find_features(des_lines_rect[:, 0])
 
-    model_robust, inliers = ransac(
-        (template_homography_rect, des_lines_rect), SimilarityTransform, min_samples=2, residual_threshold=20, max_trials=1000
-    )
-    return np.linalg.inv(des_homography) @ np.linalg.inv(model_robust.params) @ template_homography, inliers
+#     template_homography = find_projective_rectification(template_lines)
+
+#     template_homography_rect = transform_houghlines(template_lines, template_homography)
+#     template_features = find_features(template_homography_rect[:, 0])
+
+#     cost_matrix = cost_matrix_for_features(template_features, des_features)
+
+#     template_ind, des_ind = linear_sum_assignment(cost_matrix)
+#     model_robust, inliers = ransac(
+#         (template_homography_rect[template_ind, :], des_lines_rect[des_ind, :]), SimilarityTransform, min_samples=2, residual_threshold=10, max_trials=1000
+#     )
+#     return np.linalg.inv(des_homography) @ np.linalg.inv(model_robust.params) @ template_homography, inliers, template_ind, des_ind
+
+# def find_projective_rectification(vp):
+#     homography = np.array([
+#         [1, 0, 0], 
+#         [0, 1, 0], 
+#         [0, -1/vp[1], 1]
+#     ])
+#     affine = np.array([
+#         [1, -vp[0] / vp[1], 0],
+#         [0, 1, 0],
+#         [0, 0, 1]
+#     ])
+#     return affine @ homography
 
 def find_projective_rectification(lines):
     src_pts = np.empty((0, 2))
@@ -284,9 +429,11 @@ def find_projective_rectification(lines):
         src_pts = np.concatenate((src_pts, tmp_src_pts), axis=0)
         dst_pts = np.concatenate((dst_pts, tmp_dst_pts), axis=0)
     homography, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC,5.0)
-    return np.linalg.inv(homography)
+    return homography
 
 def ransac_vanishing_point_estimation(linesP, num_ransac_iter=100, threshold_inlier=5):
+    # locations = (linesP[:, [0, 1]] + linesP[:, [2, 3]]) / 2
+    # directions = linesP[:, [2, 3]] - linesP[:, [0, 1]]
     locations = (linesP[:, 0, [0, 1]] + linesP[:, 0, [2, 3]]) / 2
     directions = linesP[:, 0, [2, 3]] - linesP[:, 0, [0, 1]]
     strengths = np.linalg.norm(directions, axis=1)
@@ -325,7 +472,10 @@ def ransac_vanishing_point_estimation(linesP, num_ransac_iter=100, threshold_inl
             best_votes = current_votes
             # logging.info("Current best model has {} votes at iteration {}".format(
                 # current_votes.sum(), ransac_iter))
-    return best_model
+    if best_model is not None:
+        return best_model[:2] / best_model[2], best_votes > 0
+    else:
+        return None, None
 
 def homogeneous_coords_from_linesP(locations, directions):
     normals = np.zeros_like(directions)

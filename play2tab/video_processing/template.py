@@ -81,9 +81,6 @@ class Template:
     def register_padded_rect(self, padded_rect):
         self.padded_rect = padded_rect
     
-    def register_shift(self, new_xy):
-        self.shift = new_xy
-    
     def register_homography(self, homography):
         self.homography = homography
     
@@ -94,19 +91,11 @@ class Template:
         self.template_fretlines = np.zeros((len(fretlines), 2))
         self.template_fretlines[:, 0] = fretlines # fretlines in the template coordinate system
 
-        rot_mat = np.zeros((3, 3))
-        rot_mat[2, 2] = 1
-        rot_mat[:2, :] = self.rot_mat
-        
-        shift_mat = np.eye(3)
-        shift_mat[0, 2] = -self.shift[0]
-        shift_mat[1, 2] = -self.shift[1]
-
         second_shift_mat = np.eye(3)
         second_shift_mat[0, 2] = -self.final_shift[0]
         second_shift_mat[1, 2] = -self.final_shift[1]
 
-        self.total_mat = second_shift_mat @ self.homography @ shift_mat @ rot_mat
+        self.total_mat = second_shift_mat @ self.homography @ self.rot_mat
 
         # _, rot, t, n = cv2.decomposeHomographyMat(self.total_mat, np.eye(3))
         # homography = rot[0] + t[0] @ n[0].T
