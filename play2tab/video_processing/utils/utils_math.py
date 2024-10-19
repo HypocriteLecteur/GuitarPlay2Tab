@@ -305,18 +305,23 @@ def crop_from_oriented_bb(frame: MatLike, rect: Tuple) -> Tuple[MatLike, NDArray
         angle = rect[2]
         h = rect[1][1]
         w = rect[1][0]
-
+    
+    # rotated_cropped_frame, rot_mat = rotate_image(cropped_frame, 
+    #                                               np.array(rect[0]) - [bb[0], bb[1]], 
+    #                                               angle, 
+    #                                               custom_shape=(int(bb[2]/2+w/2 - min(bb[2]/2-w/2, 0)), cropped_frame.shape[0]), 
+    #                                               additional_shift=[-(rect[0][0] - bb[0] - w/2), 0])
+    # rotated_cropped_frame = rotated_cropped_frame[int(bb[3]/2-h/2):int(bb[3]/2+h/2), 0:int(w)]
+    cropped_center = np.array(rect[0]) - [bb[0], bb[1]]
     rotated_cropped_frame, rot_mat = rotate_image(cropped_frame, 
-                                                  np.array(rect[0]) - [bb[0], bb[1]], 
+                                                  cropped_center, 
                                                   angle, 
-                                                  custom_shape=(int(bb[2]/2+w/2 - min(bb[2]/2-w/2, 0)), cropped_frame.shape[0]), 
-                                                  additional_shift=[-(rect[0][0] - bb[0] - w/2), 0])
-
-    rotated_cropped_frame = rotated_cropped_frame[int(bb[3]/2-h/2):int(bb[3]/2+h/2), 0:int(w)]
+                                                  custom_shape=(int(cropped_center[0] + w/2), cropped_frame.shape[0]))
+    rotated_cropped_frame = rotated_cropped_frame[int(cropped_center[1] - h/2):int(cropped_center[1] + h/2), max(int(cropped_center[0] - w/2), 0):]
 
     shift_mat2 = np.eye(3)
-    shift_mat2[0, 2] = 0
-    shift_mat2[1, 2] = -int(bb[3]/2-h/2)
+    shift_mat2[0, 2] = -max(int(cropped_center[0] - w/2), 0)
+    shift_mat2[1, 2] = -int(cropped_center[1] - h/2)
     
     return rotated_cropped_frame, shift_mat2 @ np.concatenate((rot_mat, np.array([0, 0, 1]).reshape((1, 3))), axis=0) @ shift_mat
 
@@ -444,5 +449,5 @@ def find_affine_rectification(lines, shape):
     src_pts[0:-1:2, 0] = dst_pts[0:-1:2, 0]
     src_pts[1::2, 0] = houghlines_x_from_y(lines, h)
     src_pts[1::2, 1] = h
-    homography, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC,5.0)
-    return homography
+    homography, inliers = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC,5.0)
+    return homography, inliers

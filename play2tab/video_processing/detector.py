@@ -97,13 +97,15 @@ class Detector(DetectorInterface):
         # sort by dist
         # hspace, angles, dists = (list(item) for item in zip(*sorted(zip(hspace, angles, dists), key=lambda x: x[1])))
         
-        homography = utils.find_affine_rectification(frets, cropped_edges.shape)
+        homography, inliers = utils.find_affine_rectification(frets, cropped_edges.shape)
         if homography is None:
             return None, None, None
 
         if is_visualize and dists is not None:
             cdst = cv2.cvtColor(cropped_edges.copy(), cv2.COLOR_GRAY2BGR)
-            draw_houghline_batch(cdst, frets)
+            inliers_ = (inliers.squeeze()[::2]) & (inliers.squeeze()[1::2])
+            draw_houghline_batch(cdst, frets[inliers_ == True, :], color=(0, 255, 0))
+            draw_houghline_batch(cdst, frets[inliers_ == False, :], color=(0, 0, 255))
             cv2.imshow('Detected Frets', cdst)
             return homography, frets, cdst
         return homography, frets, None
@@ -192,7 +194,6 @@ class Detector(DetectorInterface):
                 for idx in frets_idx:
                     cv2.line(cdst, (int(dists[idx]), 0), (int(dists[idx]), 20), (0, 0, 255), 1)
                 cv2.imshow('locate_fretboard_debug', cdst)
-        
         if is_located:
             return True, np.vstack((dists[frets_idx], np.zeros_like(frets_idx))).T
         else:
@@ -247,21 +248,15 @@ class Detector(DetectorInterface):
         if np.sum((middle_y_diff[1:] - middle_y_diff[0]) / middle_y_diff[0] > dist_percent_tol) > 0:
             return False, None
         
-        if is_visualize:
-            cdst = cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2BGR)
-            offset_mat = np.array([
-                [1, 0, w/2],
-                [0, 1, h/2],
-                [0, 0, 1]
-            ])
-            draw_houghline_batch(cdst, utils.transform_houghlines(lines, np.linalg.inv(offset_mat)))
-            cv2.imshow('cdst', cdst)
-        
         offset_mat = np.array([
             [1, 0, int(frets[0, 0]) + w/2],
             [0, 1, h/2],
             [0, 0, 1]
         ])
+        if is_visualize:
+            cdst = cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2BGR)
+            draw_houghline_batch(cdst, utils.transform_houghlines(lines, np.linalg.inv(offset_mat)))
+            cv2.imshow('cdst', cdst)
         return True, utils.transform_houghlines(lines, np.linalg.inv(offset_mat))
 
     def detect(self, frame: MatLike, is_visualize=True) -> Tuple[bool, Union[Fretboard, None]]:
@@ -311,7 +306,7 @@ class Detector(DetectorInterface):
 
         is_frets_located, rect_frets= self.locate_frets(rect_gray, is_visualize=False)
         if is_frets_located:
-            is_strings_located, rect_strings = self.locate_strings(rect_gray, rect_frets, is_visualize=True)
+            is_strings_located, rect_strings = self.locate_strings(rect_gray, rect_frets, is_visualize=False)
             if is_strings_located:
                 total_mat = homography @ crop_mat
 

@@ -5,10 +5,23 @@ import cv2
 import numpy as np
 from utils.visualize import draw_fretboard
 
-from utils.utils_math import mask_out_oriented_bb
+from utils.utils_math import mask_out_oriented_bb, crop_from_oriented_bb, transform_points
 
 from typing import Tuple
 from cv2.typing import MatLike
+
+import mediapipe as mp
+mp_drawing = mp.solutions.drawing_utils
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(min_detection_confidence = 0.5, min_tracking_confidence=0.5)
+
+def media_pipe_hand(frame, hands):
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # frame = cv2.flip(frame, 1)
+    frame.flags.writeable = False
+    results = hands.process(frame)
+    frame.flags.writeable = True
+    return results
 
 class FretboardDetector:
     '''
@@ -66,8 +79,30 @@ class FretboardDetector:
         final_cdst = frame.copy()
         if self.fretboard is not None:
             draw_fretboard(final_cdst, self.fretboard)
-        cv2.putText(final_cdst, f'{self.counter}', (30, 30), cv2.FONT_HERSHEY_PLAIN, 2, (0, 0, 255))
 
+            hand_oriented_bb = (self.fretboard.oriented_bb[0], 
+                                (self.fretboard.oriented_bb[1][0]+100, self.fretboard.oriented_bb[1][1]),
+                                self.fretboard.oriented_bb[2])
+            cropped_frame, crop_transform = crop_from_oriented_bb(frame, hand_oriented_bb)
+
+            results = media_pipe_hand(cropped_frame, hands)
+            
+            w = cropped_frame.shape[1]
+            h = cropped_frame.shape[0]
+            if results.multi_hand_landmarks:
+                landmarks = []
+                for idx in [4, 8, 12, 16, 20]:
+                    relative_x = int(results.multi_hand_landmarks[0].landmark[idx].x * w)
+                    relative_y = int(results.multi_hand_landmarks[0].landmark[idx].y * h)
+                    landmarks.append([relative_x, relative_y])
+                    # cv2.circle(cropped_frame, (relative_x, relative_y), 5, (0, 0, 255), 3)
+                landmarks = np.array(landmarks)
+                landmarks = transform_points(landmarks, np.linalg.inv(crop_transform)).astype(int)
+                for landmark in landmarks:
+                    cv2.circle(final_cdst, (landmark[0], landmark[1]), 5, (0, 0, 255), 3)
+                    
+        cv2.putText(final_cdst, f'{self.counter}', (30, 30), cv2.FONT_HERSHEY_PLAIN, 2, (0, 0, 255))
+        cv2.imshow('final_cdst', final_cdst)
         self.video.write(final_cdst)
         self.counter = self.counter + 1
 
