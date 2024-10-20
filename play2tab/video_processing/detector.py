@@ -7,7 +7,7 @@ from skimage.transform import hough_line, hough_line_peaks
 from skimage.morphology import skeletonize
 
 import utils.utils_math as utils
-from utils.visualize import draw_houghline_batch, draw_fretboard
+from utils.visualize import draw_houghline_batch, draw_fretboard, draw_houghlineP_batch
 
 from fretboard import Fretboard
 from typing import Union, Tuple
@@ -96,13 +96,13 @@ class Detector(DetectorInterface):
 
         # sort by dist
         # hspace, angles, dists = (list(item) for item in zip(*sorted(zip(hspace, angles, dists), key=lambda x: x[1])))
-        
-        homography, inliers = utils.find_affine_rectification(frets, cropped_edges.shape)
+
+        homography, inliers = utils.find_rectification(frets, cropped_edges.shape)
         if homography is None:
             return None, None, None
 
         if is_visualize and dists is not None:
-            cdst = cv2.cvtColor(cropped_edges.copy(), cv2.COLOR_GRAY2BGR)
+            cdst = cv2.cvtColor(cropped_edges, cv2.COLOR_GRAY2BGR)
             inliers_ = (inliers.squeeze()[::2]) & (inliers.squeeze()[1::2])
             draw_houghline_batch(cdst, frets[inliers_ == True, :], color=(0, 255, 0))
             draw_houghline_batch(cdst, frets[inliers_ == False, :], color=(0, 0, 255))
@@ -133,9 +133,14 @@ class Detector(DetectorInterface):
         # filter by angle
         linesP = linesP[2*np.abs(linesP[:, 0, 0] - linesP[:, 0, 2]) <= np.abs(linesP[:, 0, 1] - linesP[:, 0, 3]), ...]
 
+        # cdst = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+
         # houghlinesp to hough line coordinates
-        lines = utils.linesP_to_houghlines(linesP)
+        lines = utils.linesP_to_houghlines(linesP, sort=True)
         dists = utils.houghlines_x_from_y(lines, rect_gray.shape[0]/2)
+
+        # for dist in dists:
+        #     cv2.circle(cdst, (int(dist), int(rect_gray.shape[0]/2)), 3, (0,255,0), 2)
         
         # second stage filter (merge closely spaced lines)
         idxes = np.argwhere(np.diff(dists) < merge_thres).squeeze()
@@ -179,11 +184,11 @@ class Detector(DetectorInterface):
             #     cv2.imshow('locate_fretboard_debug', cdst2)
             # cv2.setMouseCallback("locate_fretboard_debug", mouse_callback)
         
-        fret_dists = np.diff(dists)
-        fret_second_order_difference_normalized = np.diff(fret_dists) / fret_dists[0:-1]
+        fret_lengths = np.diff(dists)
+        fret_lengths_difference_normalized = np.diff(fret_lengths) / fret_lengths[0:-1]
         
         valid_condition = lambda x: abs(x) < validation_thres
-        subset_begin_index, max_subset = utils.find_longest_consecutive_subset(fret_second_order_difference_normalized, 
+        subset_begin_index, max_subset = utils.find_longest_consecutive_subset(fret_lengths_difference_normalized, 
                                                                          valid_condition)
         
         is_located = False
@@ -231,13 +236,13 @@ class Detector(DetectorInterface):
 
         if linesP is None or linesP.shape[0] < strings_num:
             return False, None
-                
+        
         lengths_idx = np.argsort((linesP[:, 0, 2] - linesP[:, 0, 0])**2 + (linesP[:, 0, 3] - linesP[:, 0, 1])**2)
         linesP = linesP[lengths_idx[-1:-1-6:-1]]
         lines = utils.linesP_to_houghlines(linesP)
 
         left_y = utils.houghlines_y_from_x(lines, 0)
-        right_y = utils.houghlines_y_from_x(lines, rect_gray.shape[1])
+        right_y = utils.houghlines_y_from_x(lines, edges.shape[1])
 
         # no intersection allowed
         if np.sum(np.diff(left_y) < 0) & np.sum(np.diff(right_y) < 0) > 0:
@@ -304,7 +309,7 @@ class Detector(DetectorInterface):
         
         rect_gray = cv2.warpPerspective(cropped_gray, homography, cropped_edges.shape[1::-1], flags=cv2.INTER_LINEAR)
 
-        is_frets_located, rect_frets= self.locate_frets(rect_gray, is_visualize=False)
+        is_frets_located, rect_frets= self.locate_frets(rect_gray, is_visualize=True)
         if is_frets_located:
             is_strings_located, rect_strings = self.locate_strings(rect_gray, rect_frets, is_visualize=False)
             if is_strings_located:

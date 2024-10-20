@@ -45,7 +45,7 @@ class FretboardDetector:
 
         self.fretboard = None
 
-        self.video = cv2.VideoWriter('video.mp4', cv2.VideoWriter_fourcc(*'H264'), 25, frame_shape)
+        self.video = cv2.VideoWriter('video.mp4', cv2.VideoWriter_fourcc(*'H264'), 20, frame_shape)
 
         self.counter = 0
 

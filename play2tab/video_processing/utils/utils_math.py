@@ -438,7 +438,7 @@ def ransac_vanishing_point_estimation(linesP):
 #     return affine @ homography
 # --------------------------------------------
 
-def find_affine_rectification(lines, shape):
+def find_rectification(lines, shape):
     h = shape[0]
     src_pts = np.zeros((2*lines.shape[0], 2))
     dst_pts = np.zeros((2*lines.shape[0], 2))

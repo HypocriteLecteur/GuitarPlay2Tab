@@ -45,15 +45,16 @@ class Tracker(TrackerInterface):
                        gray_rect: MatLike, 
                        frets: NDArray, 
                        transform_mat: NDArray,
-                       notmatched_thres=50,
-                       ransac_outlier_thres=5) -> Tuple[NDArray, Tuple]:
+                       notmatched_thres=30,
+                       ransac_outlier_thres=5,
+                       is_visualize=True) -> Tuple[NDArray, Tuple]:
         fret_dists = utils.houghlines_x_from_y(rect_lines, gray_rect.shape[0]/2)
 
         prev_lines = utils.transform_houghlines(frets, np.linalg.inv(transform_mat))
-        prev_fret_dists = (prev_lines[:, 0] - (gray_rect.shape[0])/2 * np.sin(prev_lines[:, 1])) / np.cos(prev_lines[:, 1])
+        prev_fret_dists = utils.houghlines_x_from_y(prev_lines, (gray_rect.shape[0])/2)
 
         cost_matrix = np.abs(prev_fret_dists.reshape((-1, 1)) - fret_dists.reshape((1, -1)))
-        cost_matrix = np.concatenate((cost_matrix, np.ones((cost_matrix.shape[0], prev_fret_dists.shape[0])) * notmatched_thres), axis=1)
+        cost_matrix = np.concatenate((cost_matrix, np.ones((cost_matrix.shape[0], prev_fret_dists.shape[0])) * notmatched_thres), axis=1) # add dummy
 
         prev_ind, now_ind = linear_sum_assignment(cost_matrix)
         matched_prev_ind = prev_ind[now_ind < min(frets.shape[0], rect_lines.shape[0])]
@@ -73,13 +74,24 @@ class Tracker(TrackerInterface):
 
         outliers = inliers == False
         if np.sum(outliers) > 0:
-            now_tracked_frets[matched_prev_ind[outliers], :] = np.vstack((s * prev_fret_dists[matched_prev_ind[outliers]] + t, 
+            now_tracked_frets[matched_prev_ind[outliers], :] = np.vstack((0.8*(s * prev_fret_dists[matched_prev_ind[outliers]] + t) + 0.2*(fret_dists[matched_now_ind][outliers]), 
                                                                           np.zeros((matched_prev_ind[outliers].shape[0])))).T
 
         notmatched_prev_ind = np.setdiff1d(np.arange(prev_fret_dists.shape[0]), matched_prev_ind)
         if notmatched_prev_ind.shape[0] > 0:
             now_tracked_frets[notmatched_prev_ind, :] = np.vstack((s * prev_fret_dists[notmatched_prev_ind] + t, 
                                                                    np.zeros((notmatched_prev_ind.shape[0])))).T
+        if is_visualize:
+            cdst = cv2.cvtColor(gray_rect, cv2.COLOR_GRAY2BGR)
+            draw_houghline_batch(cdst, rect_lines)
+            draw_houghline_batch(cdst, prev_lines, color=(255, 0, 0))
+            draw_houghline_batch(cdst, now_tracked_frets, color=(255, 255, 0))
+            # draw_houghline_batch(cdst, np.vstack((prev_fret_dists*s + t, np.zeros_like(prev_fret_dists))).T, color=(0, 255, 255))
+            for i, j in zip(matched_prev_ind, matched_now_ind):
+                cv2.line(cdst, (int(prev_lines[i, 0]), i*5+5), (int(rect_lines[j, 0]), i*5+5), (0, 255, 255), 3, cv2.LINE_AA)
+            for i, j in zip(matched_prev_ind[outliers], matched_now_ind[outliers]):
+                cv2.line(cdst, (int(prev_lines[i, 0]), i*5+5), (int(rect_lines[j, 0]), i*5+5), (255, 0, 255), 3, cv2.LINE_AA)
+            cv2.imshow('frets_matching', cdst)
         return now_tracked_frets, (s, t)
     
     def strings_locating(self, frets, gray, strings_num=6, is_visualize=False) -> Tuple[NDArray, NDArray, NDArray]:
@@ -97,6 +109,11 @@ class Tracker(TrackerInterface):
             res = cv2.matchTemplate(gray, test_template, cv2.TM_CCOEFF_NORMED)
             res[res<0.2] = 0
             coordinates = peak_local_max(res, min_distance=10) + [0, w/2]
+        
+        # cdst = cv2.cvtColor((res / np.max(res) * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        # for pnt in coordinates:
+        #     cv2.circle(cdst, (int(pnt[1]), int(pnt[0])), 3, (0, 0, 255), 2)
+        # cv2.imshow('strings_locating',cdst)
 
         if coordinates.shape[0] < 5:
             return None, None, None
@@ -123,7 +140,7 @@ class Tracker(TrackerInterface):
         ransac.fit(((coordinates[:, 1] + coordinates2[:, 1])/2).reshape((-1, 1)), ((coordinates[:, 0]+gray.shape[0] - coordinates2[:, 0])/2).reshape((-1, 1)))
         mid_line = utils.houghline_from_kb(ransac.estimator_.coef_[0, 0], ransac.estimator_.intercept_[0])
 
-        cdst = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)        
+        cdst = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         # for i in range(fret_dists.size):
         #     cv2.circle(cdst, (int(fret_dists[i]), int(strings_start_y[i])+int(h/2)), 3, (0, 0, 255))
         #     cv2.circle(cdst, (int(fret_dists[i]), int(strings_end_y[i])+int(h/2)), 3, (0, 0, 255))
@@ -265,7 +282,7 @@ class Tracker(TrackerInterface):
 
         gray = self.preprocess(cropped_frame)
 
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C , cv2.THRESH_BINARY, 31, 0)
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C , cv2.THRESH_BINARY, 21, 0)
         edges = skeletonize(thresh).astype("uint8") * 255
 
         linesP = cv2.HoughLinesP(edges, 1, np.pi / 180, 30, None, 10, 20)
@@ -275,21 +292,17 @@ class Tracker(TrackerInterface):
         if vanishing_point is None:
             return False, None
 
-        linesP = linesP[vp_inliers, ...]        
+        linesP = linesP[vp_inliers, ...]
         hb = utils.HoughBundler()
         linesP = hb.process_lines(linesP)
-        # for i in range(0, len(linesP)):
-        #     l = linesP[i][0]
-        #     cv2.line(cdst, (l[0], l[1]), (l[2], l[3]), (0,0,255), 1, cv2.LINE_AA)
         
         lines = utils.linesP_to_houghlines(linesP)
 
-        homography = utils.find_affine_rectification(lines, gray.shape)
+        homography, _ = utils.find_rectification(lines, gray.shape)
         if homography is None:
             return False, None
 
         gray_rect = cv2.warpPerspective(gray, homography, gray.shape[1::-1], flags=cv2.INTER_LINEAR)
-        cv2.imshow('gray_rect', gray_rect)
 
         rect_lines = utils.transform_houghlines(lines, np.linalg.inv(homography))
 
@@ -314,9 +327,8 @@ class Tracker(TrackerInterface):
         now_fretboard = Fretboard(utils.transform_houghlines(now_tracked_frets, homography @ crop_transform), 
                                   utils.transform_houghlines(np.vstack((upper_line, lower_line)), homography @ crop_transform), 
                                   now_oriented_bb)
-
+        
         cdst = frame.copy()
         draw_fretboard(cdst, now_fretboard)
-
         cv2.imshow('cdst', cdst)
         return True, now_fretboard
