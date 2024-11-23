@@ -1,10 +1,10 @@
 import cv2
 import numpy as np
 
-from utils.utils_math import prepare_draw_frets, prepare_draw_strings
+from .utils_math import prepare_draw_frets, prepare_draw_strings
 
 from typing import Union, List
-from fretboard import Fretboard
+from ..fretboard import Fretboard
 
 def draw_houghline(image: cv2.typing.MatLike, line: Union[np.typing.NDArray, List], **kwargs) -> None:
     length = max(image.shape[0], image.shape[1])
@@ -53,11 +53,11 @@ def draw_fretboard(image: cv2.typing.MatLike, fretboard: Fretboard) -> None:
         cv2.line(image, pt1, pt2, color=(0, 255, 0), thickness=2)
     
     pnts1, pnts2 = prepare_draw_strings(fretboard.oriented_bb, fretboard.strings)
-    if pnts1.shape[0] == 2:
-        pnts1 = pnts1[0, :] + (np.arange(0, 7)/6).reshape((7, 1)) @ (pnts1[1, :]-pnts1[0, :]).reshape((1, 2))
-        pnts2 = pnts2[0, :] + (np.arange(0, 7)/6).reshape((7, 1)) @ (pnts2[1, :]-pnts2[0, :]).reshape((1, 2))
-        pnts1 = pnts1.astype(int)
-        pnts2 = pnts2.astype(int)
+    # if pnts1.shape[0] == 2:
+    #     pnts1 = pnts1[0, :] + (np.arange(0, 7)/6).reshape((7, 1)) @ (pnts1[1, :]-pnts1[0, :]).reshape((1, 2))
+    #     pnts2 = pnts2[0, :] + (np.arange(0, 7)/6).reshape((7, 1)) @ (pnts2[1, :]-pnts2[0, :]).reshape((1, 2))
+    #     pnts1 = pnts1.astype(int)
+    #     pnts2 = pnts2.astype(int)
     for pt1, pt2 in zip(pnts1, pnts2):
         cv2.line(image, pt1, pt2, color=(0, 255, 0), thickness=2)
 

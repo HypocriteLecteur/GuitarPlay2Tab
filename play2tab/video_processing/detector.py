@@ -6,10 +6,10 @@ from itertools import combinations
 from skimage.transform import hough_line, hough_line_peaks
 from skimage.morphology import skeletonize
 
-import utils.utils_math as utils
-from utils.visualize import draw_houghline_batch, draw_fretboard, draw_houghlineP_batch
+from .utils import utils_math as utils
+from .utils.visualize import draw_houghline_batch, draw_fretboard, draw_houghlineP_batch
 
-from fretboard import Fretboard
+from .fretboard import Fretboard
 from typing import Union, Tuple
 from numpy.typing import NDArray
 from cv2.typing import MatLike
@@ -83,7 +83,7 @@ class Detector(DetectorInterface):
         cropped_fretboard_boundaries = utils.transform_houghlines(fretboard_boundaries, np.linalg.inv(crop_mat))
         return cropped_gray, cropped_edges, cropped_fretboard_boundaries, crop_mat
     
-    def find_rectification(self, cropped_edges: MatLike, theta_range=10/180*np.pi, is_visualize=False) \
+    def find_rectification(self, cropped_edges: MatLike, fretboard_boundaries: NDArray, theta_range=10/180*np.pi, is_visualize=False) \
             -> Tuple[NDArray, NDArray, Union[MatLike, None]]:
         '''
         Detect vertical frets and rectify.
@@ -94,12 +94,17 @@ class Detector(DetectorInterface):
 
         frets = np.concatenate((dists[:, np.newaxis], angles[:, np.newaxis]), axis=1)
 
+        vp_strings = utils.line_line_intersection(fretboard_boundaries[0], fretboard_boundaries[1])
+        vp_frets, inliers = utils.ransac_vanishing_point_estimation_lines(frets)
+
+        homography = utils.compute_homography(cropped_edges, np.hstack((vp_strings, 1)), np.hstack((vp_frets, 1)), clip=True)
+
         # sort by dist
         # hspace, angles, dists = (list(item) for item in zip(*sorted(zip(hspace, angles, dists), key=lambda x: x[1])))
 
-        homography, inliers = utils.find_rectification(frets, cropped_edges.shape)
-        if homography is None:
-            return None, None, None
+        # homography, inliers = utils.find_rectification(frets, cropped_edges.shape)
+        # if homography is None:
+        #     return None, None, None
 
         if is_visualize and dists is not None:
             cdst = cv2.cvtColor(cropped_edges, cv2.COLOR_GRAY2BGR)
@@ -112,7 +117,7 @@ class Detector(DetectorInterface):
     
     def locate_frets(self, 
                          rect_gray: MatLike, 
-                         frets_num=20, 
+                         frets_num=10, 
                          merge_thres=10, 
                          validation_thres=0.2, 
                          is_visualize=False) \
@@ -129,15 +134,34 @@ class Detector(DetectorInterface):
         edges = skeletonize(thresh).astype("uint8") * 255
 
         linesP = cv2.HoughLinesP(edges, 1, np.pi / 180, 20, None, 30, 20)
+        if linesP is None:
+            return False, None
 
         # filter by angle
-        linesP = linesP[2*np.abs(linesP[:, 0, 0] - linesP[:, 0, 2]) <= np.abs(linesP[:, 0, 1] - linesP[:, 0, 3]), ...]
-
-        # cdst = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        linesP = linesP[3*np.abs(linesP[:, 0, 0] - linesP[:, 0, 2]) <= np.abs(linesP[:, 0, 1] - linesP[:, 0, 3]), ...]
 
         # houghlinesp to hough line coordinates
         lines = utils.linesP_to_houghlines(linesP, sort=True)
         dists = utils.houghlines_x_from_y(lines, rect_gray.shape[0]/2)
+
+        # L = lambda i: 2**(-i/12)
+        # L_template = np.array([L(i) for i in range(23)])
+        # L_template = L_template - L_template[-1]
+        # cv2.namedWindow('image')
+        # def nothing(x):
+        #     pass
+        # cv2.createTrackbar('s','image',0,3000,nothing)
+        # cv2.createTrackbar('t','image',-500,1000,nothing)
+        # cdst = cv2.cvtColor(rect_gray, cv2.COLOR_GRAY2BGR)
+        # draw_houghline_batch(cdst, lines)
+        # while True:
+        #     cdst2 = cdst.copy()
+        #     s = cv2.getTrackbarPos('s','image')
+        #     t = cv2.getTrackbarPos('t','image')
+        #     draw_houghline_batch(cdst2, np.vstack((s*L_template+t, np.zeros_like(L_template))).T, color=(0, 0, 255))
+
+        #     cv2.imshow('image',cdst2)
+        #     cv2.waitKey(1)
 
         # for dist in dists:
         #     cv2.circle(cdst, (int(dist), int(rect_gray.shape[0]/2)), 3, (0,255,0), 2)
@@ -173,6 +197,7 @@ class Detector(DetectorInterface):
         if is_visualize:
             cdst = cv2.cvtColor(rect_gray, cv2.COLOR_GRAY2BGR)
             draw_houghline_batch(cdst, lines)
+            cv2.imshow('locate_fretboard_debug', cdst)
 
             # cv2.namedWindow("locate_fretboard_debug")
             # def mouse_callback(event, x, y, flags, param):
@@ -184,17 +209,62 @@ class Detector(DetectorInterface):
             #     cv2.imshow('locate_fretboard_debug', cdst2)
             # cv2.setMouseCallback("locate_fretboard_debug", mouse_callback)
         
-        fret_lengths = np.diff(dists)
-        fret_lengths_difference_normalized = np.diff(fret_lengths) / fret_lengths[0:-1]
+        c_theory = 2**(-1/12)
+        features = utils.houghlines_x_from_y(lines, rect_gray.shape[0]/2)
+        features_reverse = features[-1::-1]
+        Ldiff = np.diff(features_reverse)
+        fret_ratio = Ldiff[1:] / Ldiff[0:-1]
+
+        c = np.median(fret_ratio)
+
+        low_ratio_bound = 0.9
+        high_ratio_bound = 1.02
+ 
+        valid_condition = lambda x: x >= low_ratio_bound * c and x <= high_ratio_bound*max(c, c_theory)
+        subset_begin_index, max_subset = utils.find_longest_consecutive_subset(fret_ratio, valid_condition)
+
+        # grow subset
+        begin_index = subset_begin_index
+        end_index = subset_begin_index + len(max_subset) + 1
+        valid_index = np.arange(begin_index, end_index+1)
+
+        grow_end_flag = True
+        while grow_end_flag:
+            end_index = valid_index[-1]
+            prev_index = valid_index[-2]
+            high_bound = features_reverse[end_index] - low_ratio_bound*c*(features_reverse[prev_index] - features_reverse[end_index])
+            low_bound = features_reverse[end_index] - high_ratio_bound*c*(features_reverse[prev_index] - features_reverse[end_index])
+
+            inliers = (features_reverse <= high_bound) & (features_reverse >= low_bound)
+            if np.sum(inliers) > 0:
+                if np.sum(inliers) == 1:
+                    valid_index = np.hstack((valid_index, [np.where(inliers)[0][0]]))
+                else:
+                    assert('not implemented error')
+            else:
+                grow_end_flag = False
         
-        valid_condition = lambda x: abs(x) < validation_thres
-        subset_begin_index, max_subset = utils.find_longest_consecutive_subset(fret_lengths_difference_normalized, 
-                                                                         valid_condition)
-        
+        grow_start_flag = True
+        while grow_start_flag:
+            start_index = valid_index[0]
+            next_index = valid_index[1]
+            high_bound = features_reverse[start_index] + 1/low_ratio_bound/c * (features_reverse[start_index] - features_reverse[next_index])
+            low_bound = features_reverse[start_index] + 1/high_ratio_bound/c * (features_reverse[start_index] - features_reverse[next_index])
+            
+            inliers = (features_reverse <= high_bound) & (features_reverse >= low_bound)
+            if np.sum(inliers) > 0:
+                if np.sum(inliers) == 1:
+                    valid_index = np.hstack(([np.where(inliers)[0][0]], valid_index))
+                else:
+                    assert('not implemented error')
+            else:
+                grow_start_flag = False
+
         is_located = False
-        if len(max_subset) + 1 >= frets_num:
+        print(f'valid_index {len(valid_index)}')
+        if len(valid_index) >= frets_num:
             is_located = True
-            frets_idx = np.arange(subset_begin_index, subset_begin_index + len(max_subset) + 2)
+            frets_idx = -valid_index[-1::-1]-1
             if is_visualize:
                 for idx in frets_idx:
                     cv2.line(cdst, (int(dists[idx]), 0), (int(dists[idx]), 20), (0, 0, 255), 1)
@@ -203,6 +273,27 @@ class Detector(DetectorInterface):
             return True, np.vstack((dists[frets_idx], np.zeros_like(frets_idx))).T
         else:
             return False, None
+        
+        # fret_lengths = np.diff(dists)
+        # fret_lengths_difference_normalized = np.diff(fret_lengths) / fret_lengths[0:-1]
+        
+        # valid_condition = lambda x: abs(x) < validation_thres
+        # subset_begin_index, max_subset = utils.find_longest_consecutive_subset(fret_lengths_difference_normalized, 
+        #                                                                  valid_condition)
+        
+        
+        # is_located = False
+        # if len(max_subset) + 1 >= frets_num:
+        #     is_located = True
+        #     frets_idx = np.arange(subset_begin_index, subset_begin_index + len(max_subset) + 2)
+        #     if is_visualize:
+        #         for idx in frets_idx:
+        #             cv2.line(cdst, (int(dists[idx]), 0), (int(dists[idx]), 20), (0, 0, 255), 1)
+        #         cv2.imshow('locate_fretboard_debug', cdst)
+        # if is_located:
+        #     return True, np.vstack((dists[frets_idx], np.zeros_like(frets_idx))).T
+        # else:
+        #     return False, None
     
     def locate_strings(self, 
                        rect_gray: MatLike, 
@@ -264,7 +355,7 @@ class Detector(DetectorInterface):
             cv2.imshow('cdst', cdst)
         return True, utils.transform_houghlines(lines, np.linalg.inv(offset_mat))
 
-    def detect(self, frame: MatLike, is_visualize=True) -> Tuple[bool, Union[Fretboard, None]]:
+    def detect(self, frame: MatLike, bb=None, is_visualize=False) -> Tuple[bool, Union[Tuple, None], Union[Fretboard, None]]:
         '''
         Image Processing Pipeline:
         1. Preprocess: convert to gray -> denoising (median filter) -> enhance contrast (clahe)
@@ -285,6 +376,9 @@ class Detector(DetectorInterface):
         detect frets+strings or frets+feature points.
         Same goes for the tracker.
         '''
+        if bb is not None:
+            frame = frame[bb[1]:bb[1]+bb[3], bb[0]:bb[0]+bb[2], :]
+
         gray = self.preprocess(frame)
 
         edges = cv2.Canny(gray, 30, 100, 5)
@@ -303,7 +397,7 @@ class Detector(DetectorInterface):
         # cropped_gray = cv2.bitwise_and(cropped_gray, mask)
         # cropped_gray = self.clahe.apply(cropped_gray)
 
-        homography, _, _ = self.find_rectification(cropped_edges, is_visualize=False)
+        homography, _, _ = self.find_rectification(cropped_edges, cropped_fretboard_boundaries, is_visualize=False)
         if homography is None:
             return False, None
         
@@ -311,11 +405,15 @@ class Detector(DetectorInterface):
 
         is_frets_located, rect_frets= self.locate_frets(rect_gray, is_visualize=True)
         if is_frets_located:
-            is_strings_located, rect_strings = self.locate_strings(rect_gray, rect_frets, is_visualize=False)
-            if is_strings_located:
-                total_mat = homography @ crop_mat
+            total_mat = homography @ crop_mat
+            frets = utils.transform_houghlines(rect_frets, total_mat)
 
-                frets = utils.transform_houghlines(rect_frets, total_mat)
+            is_strings_located, rect_strings = self.locate_strings(rect_gray, rect_frets, is_visualize=False)
+            if not is_strings_located:
+                rect = utils.oriented_bb_from_frets_strings(frets, fretboard_boundaries)
+                rect = (rect[0], (rect[1][0] + 50, rect[1][1] + 100), rect[2])
+                fretboard = Fretboard(frets, fretboard_boundaries, rect)
+            else:
                 strings = utils.transform_houghlines(rect_strings, total_mat)
 
                 rect = utils.oriented_bb_from_frets_strings(frets, strings)
@@ -323,9 +421,11 @@ class Detector(DetectorInterface):
 
                 fretboard = Fretboard(frets, strings, rect)
 
-                if is_visualize:
-                    cdst = frame.copy()
-                    draw_fretboard(cdst, fretboard)
-                    cv2.imshow('cdst', cdst)
-                return True, fretboard
+            if is_visualize:
+                cdst = frame.copy()
+                draw_fretboard(cdst, fretboard)
+                cv2.imshow('cdst', cdst)
+            if bb is not None:
+                fretboard = utils.transform_fretboard(fretboard, bb)
+            return True, fretboard
         return False, None

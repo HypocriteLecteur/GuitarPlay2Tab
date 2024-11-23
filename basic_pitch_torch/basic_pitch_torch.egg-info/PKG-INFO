@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: basic_pitch_torch
+Version: 1.0
+Summary: torch wrapper for basic_pitch

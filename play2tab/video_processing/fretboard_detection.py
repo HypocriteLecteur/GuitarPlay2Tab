@@ -58,7 +58,7 @@ class FretboardDetector:
                 self.backSub.apply(frame_bg)
             
             cv2.waitKey(1)
-            cv2.destroyAllWindows()
+            # cv2.destroyAllWindows()
             # self.colorthresholder = ColorThresholder(self.screensize)
         else:
             fgmask = self.backSub.apply(frame, None, learningRate=0)
@@ -107,7 +107,7 @@ class FretboardDetector:
         self.counter = self.counter + 1
 
 if __name__ == '__main__':
-    cap = cv2.VideoCapture('test\\guitar3.mp4')
+    cap = cv2.VideoCapture('test\\guitar4.mp4')
     frame_shape = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
 
     loop_video = False

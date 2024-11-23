@@ -1,0 +1,12 @@
+README.md
+setup.py
+basic_pitch_torch/constants.py
+basic_pitch_torch/inference.py
+basic_pitch_torch/model.py
+basic_pitch_torch/note_creation.py
+basic_pitch_torch.egg-info/PKG-INFO
+basic_pitch_torch.egg-info/SOURCES.txt
+basic_pitch_torch.egg-info/dependency_links.txt
+basic_pitch_torch.egg-info/top_level.txt
+tests/test_compare_midi.py
+tests/test_compare_model_outputs.py

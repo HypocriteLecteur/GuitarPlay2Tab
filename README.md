@@ -1,7 +1,6 @@
 # GuitarPlay2Tab
 
 # TODO
-1. Write documentation
-2. Make sure all modules handle errors properly (especially tracking logic)
-3. Add color thresholding
-4. Extract parameters out of functions
+1. Make sure all modules handle errors properly (especially tracking logic)
+2. Add color thresholding
+3. Extract parameters out of functions

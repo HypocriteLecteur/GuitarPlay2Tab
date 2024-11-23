@@ -1,0 +1,7 @@
+# python=3.11
+opencv-python
+PyQt6
+scikit-image
+scikit-learn
+librosa
+matplotlib

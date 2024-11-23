@@ -10,10 +10,10 @@ from sklearn.linear_model import RANSACRegressor, LinearRegression
 import matplotlib.pyplot as plt
 from skimage.feature import peak_local_max
 
-import utils.utils_math as utils
-from utils.visualize import draw_houghline_batch, draw_fretboard, draw_houghline
+from .utils import utils_math as utils
+from .utils.visualize import draw_houghline_batch, draw_fretboard, draw_houghlineP_batch
 
-from fretboard import Fretboard
+from .fretboard import Fretboard
 from typing import Union, Tuple
 from numpy.typing import NDArray
 from cv2.typing import MatLike
@@ -110,10 +110,10 @@ class Tracker(TrackerInterface):
             res[res<0.2] = 0
             coordinates = peak_local_max(res, min_distance=10) + [0, w/2]
         
-        # cdst = cv2.cvtColor((res / np.max(res) * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
-        # for pnt in coordinates:
-        #     cv2.circle(cdst, (int(pnt[1]), int(pnt[0])), 3, (0, 0, 255), 2)
-        # cv2.imshow('strings_locating',cdst)
+        cdst = cv2.cvtColor((res / np.max(res) * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        for pnt in coordinates:
+            cv2.circle(cdst, (int(pnt[1]), int(pnt[0])), 3, (0, 0, 255), 2)
+        cv2.imshow('strings_locating',cdst)
 
         if coordinates.shape[0] < 5:
             return None, None, None
@@ -137,20 +137,28 @@ class Tracker(TrackerInterface):
         ransac.fit(coordinates2[:, 1].reshape((-1, 1)), (gray.shape[0] - coordinates2[:, 0]).reshape((-1, 1)))
         lower_line = utils.houghline_from_kb(ransac.estimator_.coef_[0, 0], ransac.estimator_.intercept_[0])
 
-        ransac.fit(((coordinates[:, 1] + coordinates2[:, 1])/2).reshape((-1, 1)), ((coordinates[:, 0]+gray.shape[0] - coordinates2[:, 0])/2).reshape((-1, 1)))
-        mid_line = utils.houghline_from_kb(ransac.estimator_.coef_[0, 0], ransac.estimator_.intercept_[0])
+        # ransac.fit(((coordinates[:, 1] + coordinates2[:, 1])/2).reshape((-1, 1)), ((coordinates[:, 0]+gray.shape[0] - coordinates2[:, 0])/2).reshape((-1, 1)))
+        left_point = np.array([0, (utils.houghlines_y_from_x(upper_line.reshape((1, 2)), 0)[0] + utils.houghlines_y_from_x(lower_line.reshape((1, 2)), 0)[0])/2, 1])
+        right_point = np.array([gray.shape[1], (utils.houghlines_y_from_x(upper_line.reshape((1, 2)), gray.shape[1])[0] + utils.houghlines_y_from_x(lower_line.reshape((1, 2)), gray.shape[1])[0])/2, 1])
+        line_cord = np.cross(left_point, right_point)
 
-        cdst = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        # for i in range(fret_dists.size):
-        #     cv2.circle(cdst, (int(fret_dists[i]), int(strings_start_y[i])+int(h/2)), 3, (0, 0, 255))
-        #     cv2.circle(cdst, (int(fret_dists[i]), int(strings_end_y[i])+int(h/2)), 3, (0, 0, 255))
-        #     cv2.circle(cdst, (int(fret_dists[i]), int((strings_start_y[i]+strings_end_y[i])/2)+int(h/2)), 3, (0, 0, 255))
+        t = np.arctan2(line_cord[1] / np.linalg.norm(line_cord[:2]), line_cord[0] / np.linalg.norm(line_cord[:2]))
+        r = abs(line_cord[2]) / np.linalg.norm(line_cord[:2])
+        mid_line = np.array([r, t])
+        # mid_line = utils.houghline_from_kb(ransac.estimator_.coef_[0, 0], ransac.estimator_.intercept_[0])
 
-        draw_houghline_batch(cdst, upper_line.reshape((1, 2)))
-        draw_houghline_batch(cdst, mid_line.reshape((1, 2)))
-        draw_houghline_batch(cdst, lower_line.reshape((1, 2)))
-        # draw_houghline_batch(template_res_cdst, np.vstack((fret_dists.astype(int) - int(fret_dists[0]) - int(w/2), np.zeros_like(fret_dists))).T)
-        cv2.imshow('strings cdst', cdst)
+        if is_visualize:
+            cdst = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            # for i in range(fret_dists.size):
+            #     cv2.circle(cdst, (int(fret_dists[i]), int(strings_start_y[i])+int(h/2)), 3, (0, 0, 255))
+            #     cv2.circle(cdst, (int(fret_dists[i]), int(strings_end_y[i])+int(h/2)), 3, (0, 0, 255))
+            #     cv2.circle(cdst, (int(fret_dists[i]), int((strings_start_y[i]+strings_end_y[i])/2)+int(h/2)), 3, (0, 0, 255))
+
+            draw_houghline_batch(cdst, upper_line.reshape((1, 2)))
+            draw_houghline_batch(cdst, mid_line.reshape((1, 2)))
+            draw_houghline_batch(cdst, lower_line.reshape((1, 2)))
+            # draw_houghline_batch(template_res_cdst, np.vstack((fret_dists.astype(int) - int(fret_dists[0]) - int(w/2), np.zeros_like(fret_dists))).T)
+            cv2.imshow('strings cdst', cdst)
         return upper_line, mid_line, lower_line
 
     # def strings_locating(self, frets, gray, strings_num=6, is_visualize=False) -> Tuple[NDArray, NDArray, NDArray]:
@@ -265,7 +273,7 @@ class Tracker(TrackerInterface):
     #     cv2.imshow('strings cdst', cdst)
     #     return upper_line, mid_line, lower_line
 
-    def track(self, frame: MatLike, fgmask: MatLike, fretboard: Tuple) -> Tuple[bool, Union[Fretboard, None]]:
+    def track(self, frame: MatLike, fgmask: MatLike, fretboard: Tuple, is_visualize=False) -> Tuple[bool, Union[Fretboard, None]]:
         '''
         Tracking Pipeline:
         1. Mask out background
@@ -277,8 +285,9 @@ class Tracker(TrackerInterface):
         7. Strings Localization
         '''
         cropped_frame, crop_transform = utils.crop_from_oriented_bb(frame, fretboard.oriented_bb)
-        cropped_mask, _ = utils.crop_from_oriented_bb(fgmask, fretboard.oriented_bb)
-        cropped_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=cropped_mask)
+        if fgmask is not None:
+            cropped_mask, _ = utils.crop_from_oriented_bb(fgmask, fretboard.oriented_bb)
+            cropped_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=cropped_mask)
 
         gray = self.preprocess(cropped_frame)
 
@@ -328,7 +337,8 @@ class Tracker(TrackerInterface):
                                   utils.transform_houghlines(np.vstack((upper_line, lower_line)), homography @ crop_transform), 
                                   now_oriented_bb)
         
-        cdst = frame.copy()
-        draw_fretboard(cdst, now_fretboard)
-        cv2.imshow('cdst', cdst)
+        if is_visualize:
+            cdst = frame.copy()
+            draw_fretboard(cdst, fretboard)
+            cv2.imshow('cdst', cdst)
         return True, now_fretboard
