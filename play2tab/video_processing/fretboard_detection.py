@@ -1,5 +1,5 @@
 from detector import DetectorInterface
-from tracker import TrackerInterface
+from play2tab.video_processing.tracker_copy import TrackerInterface
 
 import cv2
 import numpy as np
@@ -113,7 +113,7 @@ if __name__ == '__main__':
     loop_video = False
 
     from detector import Detector
-    from tracker import Tracker
+    from play2tab.video_processing.tracker_copy import Tracker
     fd = FretboardDetector(detector=Detector(), tracker=Tracker(), frame_shape=frame_shape)
 
     while True:

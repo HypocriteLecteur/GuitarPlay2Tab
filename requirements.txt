@@ -1,7 +1,8 @@
-# python=3.11
-opencv-python
-PyQt6
-scikit-image
-scikit-learn
-librosa
-matplotlib
+opencv-python==4.10.0.84
+PyQt6==6.7.1
+scikit-image==0.24.0
+scikit-learn==1.5.2
+librosa==0.10.2.post1
+mediapipe==0.10.18
+pretty-midi==0.2.10
+torch==2.5.1

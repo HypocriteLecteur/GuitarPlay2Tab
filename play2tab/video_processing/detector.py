@@ -5,6 +5,7 @@ import cv2
 from itertools import combinations
 from skimage.transform import hough_line, hough_line_peaks
 from skimage.morphology import skeletonize
+from pathlib import Path
 
 from .utils import utils_math as utils
 from .utils.visualize import draw_houghline_batch, draw_fretboard, draw_houghlineP_batch
@@ -25,7 +26,8 @@ class Detector(DetectorInterface):
 
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
 
-        self.string_template = cv2.cvtColor(cv2.imread('play2tab\\video_processing\\template\\string_template_2.png'), cv2.COLOR_BGR2GRAY)
+        imagepath = str(Path('.').absolute() / 'play2tab' / 'video_processing' / 'template' /'string_template_2.png')
+        self.string_template = cv2.cvtColor(cv2.imread(imagepath), cv2.COLOR_BGR2GRAY)
 
         self.fretboard = None
 
@@ -261,7 +263,7 @@ class Detector(DetectorInterface):
                 grow_start_flag = False
 
         is_located = False
-        print(f'valid_index {len(valid_index)}')
+        # print(f'valid_index {len(valid_index)}')
         if len(valid_index) >= frets_num:
             is_located = True
             frets_idx = -valid_index[-1::-1]-1
@@ -300,7 +302,7 @@ class Detector(DetectorInterface):
                        frets: NDArray, 
                        strings_num=6, 
                        dist_percent_tol=0.5, 
-                       is_visualize=True) \
+                       is_visualize=False) \
             -> Tuple[bool, Union[NDArray, None]]:
         '''
         1. Template matching
@@ -355,7 +357,7 @@ class Detector(DetectorInterface):
             cv2.imshow('cdst', cdst)
         return True, utils.transform_houghlines(lines, np.linalg.inv(offset_mat))
 
-    def detect(self, frame: MatLike, bb=None, is_visualize=False) -> Tuple[bool, Union[Tuple, None], Union[Fretboard, None]]:
+    def detect(self, frame: MatLike, bb=None, is_resize=False, is_visualize=False) -> Tuple[bool, Union[Tuple, None], Union[Fretboard, None]]:
         '''
         Image Processing Pipeline:
         1. Preprocess: convert to gray -> denoising (median filter) -> enhance contrast (clahe)
@@ -376,6 +378,11 @@ class Detector(DetectorInterface):
         detect frets+strings or frets+feature points.
         Same goes for the tracker.
         '''
+        if is_resize:
+            factor = 960 / frame.shape[1]
+            frame = cv2.resize(frame, (0, 0), fx=factor, fy=factor)
+            bb = tuple([int(factor*x) for x in bb])
+
         if bb is not None:
             frame = frame[bb[1]:bb[1]+bb[3], bb[0]:bb[0]+bb[2], :]
 
@@ -403,7 +410,7 @@ class Detector(DetectorInterface):
         
         rect_gray = cv2.warpPerspective(cropped_gray, homography, cropped_edges.shape[1::-1], flags=cv2.INTER_LINEAR)
 
-        is_frets_located, rect_frets= self.locate_frets(rect_gray, is_visualize=True)
+        is_frets_located, rect_frets= self.locate_frets(rect_gray, is_visualize=False)
         if is_frets_located:
             total_mat = homography @ crop_mat
             frets = utils.transform_houghlines(rect_frets, total_mat)
@@ -427,5 +434,7 @@ class Detector(DetectorInterface):
                 cv2.imshow('cdst', cdst)
             if bb is not None:
                 fretboard = utils.transform_fretboard(fretboard, bb)
+            if is_resize:
+                fretboard = fretboard.resize(factor=1/factor)
             return True, fretboard
         return False, None

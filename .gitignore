@@ -2,9 +2,6 @@
 test/tab_pages/output
 __pycache__/
 *.pyc
-/debug
 /test
-*.mp4
-*.log*
 /legacy
-/datasets
+/manim_animation
