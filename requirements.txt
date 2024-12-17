@@ -5,4 +5,5 @@ scikit-learn==1.5.2
 librosa==0.10.2.post1
 mediapipe==0.10.18
 pretty-midi==0.2.10
-torch==2.5.1
+kornia==0.7.4
+# torch==2.5.1

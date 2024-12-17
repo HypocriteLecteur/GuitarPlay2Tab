@@ -2,6 +2,6 @@
 test/tab_pages/output
 __pycache__/
 *.pyc
-/test
+/test2
 /legacy
 /manim_animation
