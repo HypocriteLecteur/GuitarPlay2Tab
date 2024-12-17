@@ -175,6 +175,9 @@ class Detector(DetectorInterface):
         dists = np.delete(dists, idxes+1)
         lines = np.delete(lines, idxes+1, axis=0)
 
+        if lines.shape[0] < 2:
+            return False, None
+
         # third stage filter (delete outliers)
         # fret_dists = np.diff(dists)
         # fret_second_order_difference_normalized = np.diff(np.diff(fret_dists)) / fret_dists[1:-1]
@@ -438,3 +441,41 @@ class Detector(DetectorInterface):
                 fretboard = fretboard.resize(factor=1/factor)
             return True, fretboard
         return False, None
+
+
+class HandDetector(DetectorInterface):
+    def __init__(self):
+        super().__init__()
+
+        from .utils.utils_math import transform_points
+        import mediapipe as mp
+        # mp_drawing = mp.solutions.drawing_utils
+        mp_hands = mp.solutions.hands
+        self.model_hands = mp_hands.Hands(min_detection_confidence = 0.5, min_tracking_confidence=0.5)
+        self.transform_points = transform_points
+    
+    def detect(self, frame, crop_transform=None):
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame.flags.writeable = False
+        results = self.model_hands.process(frame)
+        frame.flags.writeable = True
+        if crop_transform is not None:
+            return self.hand_mediapipe_to_numpy(results, frame, crop_transform)
+        else:
+            return self.hand_mediapipe_to_numpy(results, frame)
+    
+    def hand_mediapipe_to_numpy(self, results, frame, crop_transform=None):
+        if results.multi_hand_landmarks:
+            h, w = frame.shape[0], frame.shape[1]
+            hands = [[] for _ in range(len(results.multi_hand_landmarks))]
+            for i, hand in enumerate(results.multi_hand_landmarks):
+                for idx in range(21):
+                    hands[i].append([int(hand.landmark[idx].x * w), int(hand.landmark[idx].y * h)])
+            hands = np.array(hands)
+
+            if crop_transform is not None:
+                for i in range(len(results.multi_hand_landmarks)):
+                    hands[i, ...] = self.transform_points(hands[i, ...], np.linalg.inv(crop_transform)).astype(int)
+            return hands
+        else:
+            return None

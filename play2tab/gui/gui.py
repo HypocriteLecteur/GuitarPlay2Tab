@@ -10,11 +10,6 @@ import threading
 
 import numpy as np
 
-import mediapipe as mp
-mp_drawing = mp.solutions.drawing_utils
-mp_hands = mp.solutions.hands
-model_hands = mp_hands.Hands(min_detection_confidence = 0.5, min_tracking_confidence=0.5)
-
 class WorkerSignals(QObject):
     progress = Signal(object)
 
@@ -32,14 +27,6 @@ class Worker(QRunnable):
     @Slot()  # QtCore.Slot
     def run(self):
         self.fn(*self.args, **self.kwargs)
-
-def media_pipe_hand(frame, model_hands):
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    # frame = cv2.flip(frame, 1)
-    frame.flags.writeable = False
-    results = model_hands.process(frame)
-    frame.flags.writeable = True
-    return results
 
 class ColoredSlider(QSlider):
     def __init__(self, orientation, *args, **kwargs):
@@ -193,7 +180,7 @@ class TabWindow(QWidget):
         self.image_label.setPixmap(QPixmap.fromImage(self.image))
 
 class VideoPlayer(QMainWindow):
-    def __init__(self, detector, tracker):
+    def __init__(self, detector, tracker, hand_detector):
         super().__init__()
         self.setup_ui()
         self.cap = None
@@ -207,6 +194,7 @@ class VideoPlayer(QMainWindow):
         self.frame = None
         self.detector = detector
         self.tracker = tracker
+        self.hand_detector = hand_detector
 
         self.detected_frames = dict()
 
@@ -383,16 +371,9 @@ class VideoPlayer(QMainWindow):
                                     (fretboard.oriented_bb[1][0]+200, fretboard.oriented_bb[1][1]),
                                     fretboard.oriented_bb[2])
                 cropped_frame, crop_transform = crop_from_oriented_bb(self.frame, hand_oriented_bb)
-                results = media_pipe_hand(cropped_frame, model_hands)
-                if results.multi_hand_landmarks:
-                    h, w = cropped_frame.shape[0], cropped_frame.shape[1]
-                    hands = [[] for _ in range(len(results.multi_hand_landmarks))]
-                    for i, hand in enumerate(results.multi_hand_landmarks):
-                        for idx in range(21):
-                            hands[i].append([int(hand.landmark[idx].x * w), int(hand.landmark[idx].y * h)])
-                    hands = np.array(hands)
-                    for i in range(len(results.multi_hand_landmarks)):
-                        hands[i, ...] = transform_points(hands[i, ...], np.linalg.inv(crop_transform)).astype(int)
+
+                hands = self.hand_detector.detect(cropped_frame, crop_transform=crop_transform)
+                if hands:
                     self.gui_draw_fretboard(self.frame, fretboard, hands)
                     self.detected_frames[self.current_frame] = (fretboard, hands)
                 else:
@@ -426,16 +407,8 @@ class VideoPlayer(QMainWindow):
                                     (fretboard.oriented_bb[1][0]+200, fretboard.oriented_bb[1][1]),
                                     fretboard.oriented_bb[2])
                 cropped_frame, crop_transform = crop_from_oriented_bb(frame, hand_oriented_bb)
-                results = media_pipe_hand(cropped_frame, model_hands) 
-                if results.multi_hand_landmarks:
-                    h, w = cropped_frame.shape[0], cropped_frame.shape[1]
-                    hands = [[] for _ in range(len(results.multi_hand_landmarks))]
-                    for i, hand in enumerate(results.multi_hand_landmarks):
-                        for idx in range(21):
-                            hands[i].append([int(hand.landmark[idx].x * w), int(hand.landmark[idx].y * h)])
-                    hands = np.array(hands)
-                    for i in range(len(results.multi_hand_landmarks)):
-                        hands[i, ...] = transform_points(hands[i, ...], np.linalg.inv(crop_transform)).astype(int)
+                hands = self.hand_detector.detect(cropped_frame, crop_transform=crop_transform)
+                if hands is not None:
                     result = (fretboard, hands)
                 else:
                     result = (fretboard, None)
@@ -521,12 +494,12 @@ if __name__ == "__main__":
 
     from video_processing.utils.utils_math import crop_from_oriented_bb, transform_points
 
-    from video_processing.detector import Detector
+    from video_processing.detector import Detector, HandDetector
     from video_processing.tracker import TrackerLightGlue
     from video_processing.utils.visualize import draw_fretboard
     
     app = QApplication(sys.argv)
-    player = VideoPlayer(detector=Detector(), tracker=TrackerLightGlue())
+    player = VideoPlayer(detector=Detector(), tracker=TrackerLightGlue(), hand_detector=HandDetector())
 
     player.show()
     sys.exit(app.exec())

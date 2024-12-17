@@ -1,27 +1,14 @@
-from detector import DetectorInterface
-from play2tab.video_processing.tracker_copy import TrackerInterface
+from video_processing.detector import DetectorInterface
+from video_processing.tracker import TrackerInterface
 
 import cv2
 import numpy as np
-from utils.visualize import draw_fretboard
+from video_processing.utils.visualize import draw_fretboard
 
-from utils.utils_math import mask_out_oriented_bb, crop_from_oriented_bb, transform_points
+from video_processing.utils.utils_math import mask_out_oriented_bb, crop_from_oriented_bb, transform_points
 
 from typing import Tuple
 from cv2.typing import MatLike
-
-import mediapipe as mp
-mp_drawing = mp.solutions.drawing_utils
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(min_detection_confidence = 0.5, min_tracking_confidence=0.5)
-
-def media_pipe_hand(frame, hands):
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    # frame = cv2.flip(frame, 1)
-    frame.flags.writeable = False
-    results = hands.process(frame)
-    frame.flags.writeable = True
-    return results
 
 class FretboardDetector:
     '''
@@ -35,13 +22,14 @@ class FretboardDetector:
     If the fretboard is lost, switch back to initialization stage.
     '''
 
-    def __init__(self, detector: DetectorInterface, tracker: TrackerInterface, frame_shape: Tuple[int, int]) -> None:
+    def __init__(self, detector: DetectorInterface, tracker: TrackerInterface, hand_detector: DetectorInterface, frame_shape: Tuple[int, int]) -> None:
         self.is_initialized = False
 
         self.backSub = cv2.createBackgroundSubtractorMOG2()
 
         self.detector = detector
         self.tracker = tracker
+        self.hand_detector = hand_detector
 
         self.fretboard = None
 
@@ -51,26 +39,19 @@ class FretboardDetector:
 
     def detect(self, frame: MatLike) -> None:
         if not self.is_initialized:
-            self.is_initialized, self.fretboard = self.detector.detect(frame)
-
+            resized, scale = resize_with_aspect(frame, (540, 960))
+            bbox = cv2.selectROI("Select ROI", resized, fromCenter=False, showCrosshair=True)
+            bbox = tuple([int(x / scale) for x in bbox])
+            self.is_initialized, self.fretboard = self.detector.detect(frame, bbox)
             if self.is_initialized:
-                frame_bg = mask_out_oriented_bb(frame, self.fretboard.oriented_bb)
-                self.backSub.apply(frame_bg)
-            
+                self.tracker.create_template(frame, self.fretboard)
             cv2.waitKey(1)
             # cv2.destroyAllWindows()
             # self.colorthresholder = ColorThresholder(self.screensize)
         else:
-            fgmask = self.backSub.apply(frame, None, learningRate=0)
-
-            self.is_initialized, self.fretboard = self.tracker.track(frame, fgmask, self.fretboard)
+            self.is_initialized, self.fretboard = self.tracker.track(frame)
             if not self.is_initialized:
                 self.is_initialized, self.fretboard = self.detector.detect(frame) 
-            
-            if self.is_initialized:
-                frame_bg = mask_out_oriented_bb(frame, self.fretboard.oriented_bb)
-                self.backSub.apply(frame_bg, None, learningRate=-1)
-            # cv2.imshow('bg_model', self.backSub.getBackgroundImage())
             cv2.waitKey(1)
 
             # self.videoplayback.put(final_cdst)
@@ -85,26 +66,24 @@ class FretboardDetector:
                                 self.fretboard.oriented_bb[2])
             cropped_frame, crop_transform = crop_from_oriented_bb(frame, hand_oriented_bb)
 
-            results = media_pipe_hand(cropped_frame, hands)
-            
-            w = cropped_frame.shape[1]
-            h = cropped_frame.shape[0]
-            if results.multi_hand_landmarks:
-                landmarks = []
-                for idx in [4, 8, 12, 16, 20]:
-                    relative_x = int(results.multi_hand_landmarks[0].landmark[idx].x * w)
-                    relative_y = int(results.multi_hand_landmarks[0].landmark[idx].y * h)
-                    landmarks.append([relative_x, relative_y])
-                    # cv2.circle(cropped_frame, (relative_x, relative_y), 5, (0, 0, 255), 3)
-                landmarks = np.array(landmarks)
-                landmarks = transform_points(landmarks, np.linalg.inv(crop_transform)).astype(int)
-                for landmark in landmarks:
-                    cv2.circle(final_cdst, (landmark[0], landmark[1]), 5, (0, 0, 255), 3)
+            hands = self.hand_detector.detect(cropped_frame, crop_transform=crop_transform)
+            if hands is not None:
+                for i in range(hands.shape[0]):
+                    for landmark in hands[i]:
+                        cv2.circle(final_cdst, (landmark[0], landmark[1]), 5, (0, 0, 255), 3)
                     
         cv2.putText(final_cdst, f'{self.counter}', (30, 30), cv2.FONT_HERSHEY_PLAIN, 2, (0, 0, 255))
+
+        final_cdst, _ = resize_with_aspect(final_cdst, (540, 960))
+
         cv2.imshow('final_cdst', final_cdst)
         self.video.write(final_cdst)
         self.counter = self.counter + 1
+
+def resize_with_aspect(frame, max_size):
+    h, w = frame.shape[:2]
+    scale = min(max_size[1] / w, max_size[0] / h)
+    return cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA), scale
 
 if __name__ == '__main__':
     cap = cv2.VideoCapture('test\\guitar4.mp4')
@@ -112,9 +91,9 @@ if __name__ == '__main__':
 
     loop_video = False
 
-    from detector import Detector
-    from play2tab.video_processing.tracker_copy import Tracker
-    fd = FretboardDetector(detector=Detector(), tracker=Tracker(), frame_shape=frame_shape)
+    from video_processing.detector import Detector, HandDetector
+    from video_processing.tracker import TrackerLightGlue
+    fd = FretboardDetector(detector=Detector(), tracker=TrackerLightGlue(), hand_detector=HandDetector(), frame_shape=frame_shape)
 
     while True:
         ret, frame = cap.read()
