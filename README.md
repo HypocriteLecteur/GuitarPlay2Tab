@@ -37,3 +37,25 @@ or a gui demo with:
 ```
 python ./play2tab/gui/gui.py
 ```
+
+## Using Docker (Windows 11)
+1. Install docker (WSL 2 backend)
+2. Install Xserver (VcXsrv or Xming, etc)
+3. Build image:
+```
+docker build -t guitarplay2tab .
+```
+Building the docker image for the first time requires downloading several Gbs of data, 
+this will take a while, make sure you have stable connection.
+
+I recommend not editing the `requirements-docker.txt` if you have already built the image.
+The Docker build cache will be invalidated everytime a change is made to this file,
+and all dependencies will be reinstalled. 
+To prevent this, if extra dependencies are needed, add them after `RUN pip install -r requirements-docker.txt`.
+
+4. Run your Xserver and run code with:
+```
+docker run --rm --gpus=all guitarplay2tab
+```
+
+5. Remember to rebuild image if change is made to the source code, this shouldn't take long if there's an available build cache.
