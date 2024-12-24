@@ -131,14 +131,17 @@ class Extractor(torch.nn.Module):
         self.conf = SimpleNamespace(**{**self.default_conf, **conf})
 
     @torch.no_grad()
-    def extract(self, img: torch.Tensor, **conf) -> dict:
+    def extract(self, img: torch.Tensor, mask=None, **conf) -> dict:
         """Perform extraction with online resizing"""
         if img.dim() == 3:
             img = img[None]  # add batch dim
         assert img.dim() == 4
         shape = img.shape[-2:][::-1]
         img, scales = ImagePreprocessor(**{**self.preprocess_conf, **conf})(img)
-        feats = self.forward({"image": img})
+        if mask is not None:
+            mask = mask[None, None, :, :]
+            mask, _ = ImagePreprocessor(**{**self.preprocess_conf, **conf})(mask)
+        feats = self.forward({"image": img, "mask": mask})
         feats["image_size"] = torch.tensor(shape)[None].to(img).float()
         feats["keypoints"] = (feats["keypoints"] + 0.5) / scales[None] - 0.5
         return feats

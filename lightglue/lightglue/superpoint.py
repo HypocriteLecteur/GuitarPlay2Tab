@@ -142,6 +142,7 @@ class SuperPoint(Extractor):
         for key in self.required_data_keys:
             assert key in data, f"Missing key {key} in data"
         image = data["image"]
+        mask = data["mask"]
         if image.shape[1] == 3:
             image = rgb_to_grayscale(image)
 
@@ -162,6 +163,11 @@ class SuperPoint(Extractor):
         cPa = self.relu(self.convPa(x))
         scores = self.convPb(cPa)
         scores = torch.nn.functional.softmax(scores, 1)[:, :-1]
+        if mask is not None:
+            with torch.no_grad():
+                mask = self.pool(self.pool(self.pool(mask)))
+            mask.expand(*scores.shape)
+            scores = scores * mask
         b, _, h, w = scores.shape
         scores = scores.permute(0, 2, 3, 1).reshape(b, h, w, 8, 8)
         scores = scores.permute(0, 1, 3, 2, 4).reshape(b, h * 8, w * 8)

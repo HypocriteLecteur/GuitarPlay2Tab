@@ -42,7 +42,7 @@ class Detector(DetectorInterface):
                                      houghline_thres=280,
                                      theta_tol=9, 
                                      rho_tol=50, 
-                                     is_visualize=False) \
+                                     is_visualize=True) \
             -> Tuple[Union[NDArray, None], Union[MatLike, None]]:
         '''
         Detect near-parallel line pair that is the farthest apart.
@@ -85,19 +85,22 @@ class Detector(DetectorInterface):
         cropped_fretboard_boundaries = utils.transform_houghlines(fretboard_boundaries, np.linalg.inv(crop_mat))
         return cropped_gray, cropped_edges, cropped_fretboard_boundaries, crop_mat
     
-    def find_rectification(self, cropped_edges: MatLike, fretboard_boundaries: NDArray, theta_range=10/180*np.pi, is_visualize=False) \
+    def find_rectification(self, cropped_edges: MatLike, fretboard_boundaries: NDArray, vp_frets=None, theta_range=20/180*np.pi, is_visualize=True) \
             -> Tuple[NDArray, NDArray, Union[MatLike, None]]:
         '''
         Detect vertical frets and rectify.
         '''
-        tested_angles = np.linspace(-theta_range, theta_range, 10, endpoint=False)
-        h, theta, d = hough_line(cropped_edges, theta=tested_angles)
-        hspace, angles, dists = hough_line_peaks(h, theta, d, min_distance=9, min_angle=10)
+        frets = None
+        if vp_frets is None:
+            tested_angles = np.linspace(-theta_range, theta_range, 20, endpoint=False)
+            h, theta, d = hough_line(cropped_edges, theta=tested_angles)
+            hspace, angles, dists = hough_line_peaks(h, theta, d, min_distance=9, min_angle=10)
 
-        frets = np.concatenate((dists[:, np.newaxis], angles[:, np.newaxis]), axis=1)
+            frets = np.concatenate((dists[:, np.newaxis], angles[:, np.newaxis]), axis=1)
+
+            vp_frets, inliers = utils.ransac_vanishing_point_estimation_lines(frets)
 
         vp_strings = utils.line_line_intersection(fretboard_boundaries[0], fretboard_boundaries[1])
-        vp_frets, inliers = utils.ransac_vanishing_point_estimation_lines(frets)
 
         homography = utils.compute_homography(cropped_edges, np.hstack((vp_strings, 1)), np.hstack((vp_frets, 1)), clip=True)
 
@@ -108,11 +111,12 @@ class Detector(DetectorInterface):
         # if homography is None:
         #     return None, None, None
 
-        if is_visualize and dists is not None:
+        if is_visualize and frets is not None:
             cdst = cv2.cvtColor(cropped_edges, cv2.COLOR_GRAY2BGR)
-            inliers_ = (inliers.squeeze()[::2]) & (inliers.squeeze()[1::2])
-            draw_houghline_batch(cdst, frets[inliers_ == True, :], color=(0, 255, 0))
-            draw_houghline_batch(cdst, frets[inliers_ == False, :], color=(0, 0, 255))
+            draw_houghline_batch(cdst, frets[inliers, :])
+            # inliers_ = (inliers.squeeze()[::2]) & (inliers.squeeze()[1::2])
+            # draw_houghline_batch(cdst, frets[inliers_ == True, :], color=(0, 255, 0))
+            # draw_houghline_batch(cdst, frets[inliers_ == False, :], color=(0, 0, 255))
             cv2.imshow('Detected Frets', cdst)
             return homography, frets, cdst
         return homography, frets, None
@@ -141,6 +145,8 @@ class Detector(DetectorInterface):
 
         # filter by angle
         linesP = linesP[3*np.abs(linesP[:, 0, 0] - linesP[:, 0, 2]) <= np.abs(linesP[:, 0, 1] - linesP[:, 0, 3]), ...]
+        if linesP.shape[0] == 0:
+            return False, None
 
         # houghlinesp to hough line coordinates
         lines = utils.linesP_to_houghlines(linesP, sort=True)
@@ -360,7 +366,7 @@ class Detector(DetectorInterface):
             cv2.imshow('cdst', cdst)
         return True, utils.transform_houghlines(lines, np.linalg.inv(offset_mat))
 
-    def detect(self, frame: MatLike, bb=None, is_resize=False, is_visualize=False) -> Tuple[bool, Union[Tuple, None], Union[Fretboard, None]]:
+    def detect(self, frame: MatLike, bb=None, fretboard_boundaries=None, is_resize=False, is_visualize=False) -> Tuple[bool, Union[Tuple, None], Union[Fretboard, None]]:
         '''
         Image Processing Pipeline:
         1. Preprocess: convert to gray -> denoising (median filter) -> enhance contrast (clahe)
@@ -381,19 +387,30 @@ class Detector(DetectorInterface):
         detect frets+strings or frets+feature points.
         Same goes for the tracker.
         '''
+        if fretboard_boundaries is not None:
+            fretboard_boundaries = np.array(fretboard_boundaries)
+
         if is_resize:
             factor = 960 / frame.shape[1]
             frame = cv2.resize(frame, (0, 0), fx=factor, fy=factor)
-            bb = tuple([int(factor*x) for x in bb])
+            if bb is not None:
+                bb = tuple([int(factor*x) for x in bb])
+            if fretboard_boundaries is not None:
+                fretboard_boundaries = factor*fretboard_boundaries
 
         if bb is not None:
             frame = frame[bb[1]:bb[1]+bb[3], bb[0]:bb[0]+bb[2], :]
+            if fretboard_boundaries is not None:
+                fretboard_boundaries = fretboard_boundaries - [bb[0], bb[1]]
 
         gray = self.preprocess(frame)
 
         edges = cv2.Canny(gray, 30, 100, 5)
 
-        fretboard_boundaries, _ = self.fretboard_boundary_detection(edges, theta_tol=5, rho_tol=50, is_visualize=False)
+        if fretboard_boundaries is None:
+            fretboard_boundaries, _ = self.fretboard_boundary_detection(edges, theta_tol=5, rho_tol=50, is_visualize=False)
+        else:
+            fretboard_boundaries = utils.linesP_to_houghlines(np.expand_dims(fretboard_boundaries, axis=1))
         if fretboard_boundaries is None:
             return False, None
         
@@ -407,24 +424,62 @@ class Detector(DetectorInterface):
         # cropped_gray = cv2.bitwise_and(cropped_gray, mask)
         # cropped_gray = self.clahe.apply(cropped_gray)
 
-        homography, _, _ = self.find_rectification(cropped_edges, cropped_fretboard_boundaries, is_visualize=False)
+        lsd = cv2.ximgproc.createFastLineDetector()
+        lsd_linesP = lsd.detect(cropped_gray)
+
+        from .utils.rectification import edgelets_from_linesP, ransac_vanishing_point, reestimate_model
+
+        hb = utils.HoughBundler()
+        # import cProfile
+        # import pstats
+        # with cProfile.Profile() as profile:
+        lsd_linesP = hb.process_lines(lsd_linesP)
+
+        linesP_vertical = lsd_linesP[np.abs(lsd_linesP[:, 0, 0] - lsd_linesP[:, 0, 2]) <= np.abs(lsd_linesP[:, 0, 1] - lsd_linesP[:, 0, 3]), ...]
+        # linesP_horizontal = lsd_linesP[np.abs(lsd_linesP[:, 0, 0] - lsd_linesP[:, 0, 2]) > np.abs(lsd_linesP[:, 0, 1] - lsd_linesP[:, 0, 3]), ...]
+        # line_on_image = lsd.drawSegments(cropped_gray, linesP_vertical)
+        # cv2.imshow('line_on_image', line_on_image)
+        # cv2.waitKey()
+        edgelets1 = edgelets_from_linesP(linesP_vertical)
+    
+        vp_frets = ransac_vanishing_point(edgelets1, 500, threshold_inlier=5)
+        vp_frets = reestimate_model(vp_frets, edgelets1, 5)
+        # vis_model(cropped_gray, edgelets1, vp_frets)
+
+        # with open('lsd.txt', 'w') as stream:
+        #     stats = pstats.Stats(profile, stream=stream).sort_stats('tottime')
+        #     stats.print_stats()
+        
+        # with cProfile.Profile() as profile:
+        homography, _, _ = self.find_rectification(cropped_edges, cropped_fretboard_boundaries, vp_frets=vp_frets[:2] / vp_frets[2], is_visualize=False)
+        # with open('.txt', 'w') as stream:
+            # stats = pstats.Stats(profile, stream=stream).sort_stats('tottime')
+            # stats.print_stats()
         if homography is None:
             return False, None
         
         rect_gray = cv2.warpPerspective(cropped_gray, homography, cropped_edges.shape[1::-1], flags=cv2.INTER_LINEAR)
+        # cv2.imshow('rect_gray', rect_gray)
 
         is_frets_located, rect_frets= self.locate_frets(rect_gray, is_visualize=False)
         if is_frets_located:
             total_mat = homography @ crop_mat
             frets = utils.transform_houghlines(rect_frets, total_mat)
 
-            is_strings_located, rect_strings = self.locate_strings(rect_gray, rect_frets, is_visualize=False)
+            if fretboard_boundaries is not None:
+                rect_strings = fretboard_boundaries
+                is_strings_located = True
+            else:
+                is_strings_located, rect_strings = self.locate_strings(rect_gray, rect_frets, is_visualize=False)
             if not is_strings_located:
                 rect = utils.oriented_bb_from_frets_strings(frets, fretboard_boundaries)
                 rect = (rect[0], (rect[1][0] + 50, rect[1][1] + 100), rect[2])
                 fretboard = Fretboard(frets, fretboard_boundaries, rect)
             else:
-                strings = utils.transform_houghlines(rect_strings, total_mat)
+                if fretboard_boundaries is None:
+                    strings = utils.transform_houghlines(rect_strings, total_mat)
+                else:
+                    strings = rect_strings
 
                 rect = utils.oriented_bb_from_frets_strings(frets, strings)
                 rect = (rect[0], (rect[1][0] + 50, rect[1][1] + 100), rect[2])
@@ -454,11 +509,68 @@ class HandDetector(DetectorInterface):
         self.model_hands = mp_hands.Hands(min_detection_confidence = 0.5, min_tracking_confidence=0.5)
         self.transform_points = transform_points
     
-    def detect(self, frame, crop_transform=None):
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame.flags.writeable = False
-        results = self.model_hands.process(frame)
-        frame.flags.writeable = True
+    def hand_position_estimation(self, cropped_frame, fretboard, crop_transform):
+        frets = utils.transform_houghlines(fretboard.frets, np.linalg.inv(crop_transform))
+        strings = utils.transform_houghlines(fretboard.strings, np.linalg.inv(crop_transform))
+
+        cornerpoints = utils.cornerpoints_from_frets_strings(frets, strings).astype(int)
+        h = abs(cornerpoints[1, 1] - cornerpoints[0, 1])
+        w = abs(cornerpoints[2, 0] - cornerpoints[0, 0])
+        target_cornerpoints = np.array([
+            [0, 0],
+            [0, h],
+            [w, h],
+            [w, 0]
+        ])
+
+        M, mask = cv2.findHomography(cornerpoints, target_cornerpoints, cv2.RANSAC, 5.0)
+        rect_img = cv2.warpPerspective(cropped_frame, M, (w, h), flags=cv2.INTER_LINEAR)
+
+        # R-X color anomaly detection
+        choices = np.random.randint(0, rect_img.shape[0]*rect_img.shape[0], 10000)
+        color_mean = np.mean(rect_img.reshape((-1, 3))[choices], axis=0)
+        color_invvar = np.linalg.inv((rect_img.reshape((-1, 3))[choices] - color_mean).T @ (rect_img.reshape((-1, 3))[choices] - color_mean))
+        mahalanobis = np.sum(((rect_img.reshape((-1, 3)) - color_mean) @ color_invvar) * (rect_img.reshape((-1, 3)) - color_mean), axis=1)
+
+        r, c = np.where((mahalanobis >= 0.08**2).reshape(h, w))
+
+        center = np.array([np.median(c), np.median(r)]).reshape((1, 2))
+
+        if np.isnan(center[0][0]):
+            return None
+
+        return utils.transform_points(center, np.linalg.inv(M)).reshape(-1,).astype(int)
+    
+    def detect(self, frame, fretboard=None, crop_transform=None, prev_hands=None):
+        if fretboard is not None:
+            if prev_hands is not None:
+                hand_pos = np.mean(prev_hands[0], axis=0)
+                hand_pos = utils.transform_points(hand_pos.reshape((1, 2)), crop_transform).reshape(-1,).astype(int)
+            else:
+                hand_pos = self.hand_position_estimation(frame, fretboard, crop_transform)
+            if hand_pos is not None:
+                bb = [hand_pos[0]-int(0.5*frame.shape[0]), 0, frame.shape[0], frame.shape[0]]
+
+                frame = frame[bb[1]:bb[1]+bb[3], bb[0]:bb[0]+bb[2], :]
+
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                shift_mat = np.eye(3)
+                shift_mat[0, 2] = -bb[0]
+                shift_mat[1, 2] = -bb[1]
+
+                crop_transform = shift_mat @ crop_transform
+
+                results = self.model_hands.process(frame)
+            else:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = self.model_hands.process(frame)
+            
+        else:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # frame.flags.writeable = False
+            results = self.model_hands.process(frame)
+            # frame.flags.writeable = True
         if crop_transform is not None:
             return self.hand_mediapipe_to_numpy(results, frame, crop_transform)
         else:

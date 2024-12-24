@@ -128,80 +128,79 @@ def houghlines_x_from_y(lines, y):
 def houghline_from_kb(slope, intercept):
     return np.array([-intercept/np.sqrt(slope**2 + 1), np.arctan2(-1/np.sqrt(slope**2 + 1), slope/np.sqrt(slope**2 + 1))])
 
-class HoughBundler:     
+import numba
+
+@numba.njit
+def line_magnitude(x1, y1, x2, y2):
+    line_magnitude = math.sqrt(math.pow((x2 - x1), 2) + math.pow((y2 - y1), 2))
+    return line_magnitude
+
+@numba.njit
+def distance_point_to_line(px, py, line):
+    x1, y1, x2, y2 = line
+
+    lmag = line_magnitude(x1, y1, x2, y2)
+    if lmag < 1e-8:  # Avoid division by a very small number
+        return 9999
+
+    u1 = ((px - x1) * (x2 - x1)) + ((py - y1) * (y2 - y1))
+    u = u1 / (lmag ** 2)
+
+    if u < -0.5 or u > 1.5:
+        # Closest point does not fall within the line segment
+        ix = line_magnitude(px, py, x1, y1)
+        iy = line_magnitude(px, py, x2, y2)
+        return min(ix, iy)
+    else:
+        # Intersecting point is on the line
+        ix = x1 + u * (x2 - x1)
+        iy = y1 + u * (y2 - y1)
+        return line_magnitude(px, py, ix, iy)
+
+@numba.njit
+def get_distance(a_line, b_line):
+    dist1 = distance_point_to_line(a_line[0], a_line[1], b_line)
+    dist2 = distance_point_to_line(a_line[2], a_line[3], b_line)
+    dist3 = distance_point_to_line(b_line[0], b_line[1], a_line)
+    dist4 = distance_point_to_line(b_line[2], b_line[3], a_line)
+    return min(dist1, dist2, dist3, dist4)
+
+@numba.njit
+def get_orientation(line):
+    orientation = math.atan2(abs(line[3] - line[1]), abs(line[2] - line[0]))
+    return math.degrees(orientation)
+
+def check_is_line_different(line_1, groups, min_distance_to_merge, min_angle_to_merge):
+    for group in groups:
+        for line_2 in group:
+            if get_distance(line_2, line_1) < min_distance_to_merge:
+                orientation_1 = get_orientation(line_1)
+                orientation_2 = get_orientation(line_2)
+                if abs(orientation_1 - orientation_2) < min_angle_to_merge:
+                    group.append(line_1)
+                    return False
+    return True
+
+from numba.typed import List
+
+class HoughBundler:
     def __init__(self,min_distance=5,min_angle=2):
         self.min_distance = min_distance
         self.min_angle = min_angle
-    
-    def get_orientation(self, line):
-        orientation = math.atan2(abs((line[3] - line[1])), abs((line[2] - line[0])))
-        return math.degrees(orientation)
-
-    def check_is_line_different(self, line_1, groups, min_distance_to_merge, min_angle_to_merge):
-        for group in groups:
-            for line_2 in group:
-                if self.get_distance(line_2, line_1) < min_distance_to_merge:
-                    orientation_1 = self.get_orientation(line_1)
-                    orientation_2 = self.get_orientation(line_2)
-                    if abs(orientation_1 - orientation_2) < min_angle_to_merge:
-                        group.append(line_1)
-                        return False
-        return True
-
-    def distance_point_to_line(self, point, line):
-        px, py = point
-        x1, y1, x2, y2 = line
-
-        def line_magnitude(x1, y1, x2, y2):
-            line_magnitude = math.sqrt(math.pow((x2 - x1), 2) + math.pow((y2 - y1), 2))
-            return line_magnitude
-
-        lmag = line_magnitude(x1, y1, x2, y2)
-        if lmag < 0.00000001:
-            distance_point_to_line = 9999
-            return distance_point_to_line
-
-        u1 = (((px - x1) * (x2 - x1)) + ((py - y1) * (y2 - y1)))
-        u = u1 / (lmag * lmag)
-
-        if (u < -0.5) or (u > 1.5):
-            #// closest point does not fall within the line segment, take the shorter distance
-            #// to an endpoint
-            ix = line_magnitude(px, py, x1, y1)
-            iy = line_magnitude(px, py, x2, y2)
-            if ix > iy:
-                distance_point_to_line = iy
-            else:
-                distance_point_to_line = ix
-        else:
-            # Intersecting point is on the line, use the formula
-            ix = x1 + u * (x2 - x1)
-            iy = y1 + u * (y2 - y1)
-            distance_point_to_line = line_magnitude(px, py, ix, iy)
-
-        return distance_point_to_line
-
-    def get_distance(self, a_line, b_line):
-        dist1 = self.distance_point_to_line(a_line[:2], b_line)
-        dist2 = self.distance_point_to_line(a_line[2:], b_line)
-        dist3 = self.distance_point_to_line(b_line[:2], a_line)
-        dist4 = self.distance_point_to_line(b_line[2:], a_line)
-
-        return min(dist1, dist2, dist3, dist4)
 
     def merge_lines_into_groups(self, lines):
-        groups = []  # all lines groups are here
+        groups = [] # all lines groups are here
         # first line will create new group every time
         groups.append([lines[0]])
         # if line is different from existing gropus, create a new group
         for line_new in lines[1:]:
-            if self.check_is_line_different(line_new, groups, self.min_distance, self.min_angle):
+            if check_is_line_different(line_new, groups, self.min_distance, self.min_angle):
                 groups.append([line_new])
 
         return groups
 
     def merge_line_segments(self, lines):
-        orientation = self.get_orientation(lines[0])
+        orientation = get_orientation(lines[0])
       
         if(len(lines) == 1):
             return np.block([[lines[0][:2], lines[0][2:]]])
@@ -220,11 +219,11 @@ class HoughBundler:
         return np.block([[points[0],points[-1]]])
 
     def process_lines(self, lines):
-        lines_horizontal  = []
-        lines_vertical  = []
+        lines_horizontal = []
+        lines_vertical = []
   
         for line_i in [l[0] for l in lines]:
-            orientation = self.get_orientation(line_i)
+            orientation = get_orientation(line_i)
             # if vertical
             if 45 < orientation <= 90:
                 lines_vertical.append(line_i)
@@ -369,6 +368,15 @@ def line_line_intersection(l1, l2):
 def line_line_intersection_batch(lines, l2):
     tmp = np.cross([np.cos(lines[:, 1]), np.sin(lines[:, 1]), -lines[:, 0]], [np.cos(l2[1]), np.sin(l2[1]), -l2[0]])
     return tmp[:2] / tmp[2]
+
+def cornerpoints_from_frets_strings(frets: NDArray, strings: NDArray) -> NDArray:
+    cornerpoints = np.array([
+        line_line_intersection(strings[0], frets[0]),
+        line_line_intersection(strings[-1], frets[0]),
+        line_line_intersection(strings[-1], frets[-1]),
+        line_line_intersection(strings[0], frets[-1]),
+    ])
+    return cornerpoints
 
 def oriented_bb_from_frets_strings(frets: NDArray, strings: NDArray) -> Tuple:
     cornerpoints = np.array([

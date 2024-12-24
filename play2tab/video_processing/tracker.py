@@ -366,22 +366,60 @@ class TrackerLightGlue(TrackerInterface):
         self.fretboard0 = None
 
         self.resize_width = resize_width
+
+        self.image1_size = None
         
-    def preprocess(self, frame):
-        if self.resize_width is not None:
+    def preprocess(self, frame, is_resize=True):
+        if is_resize is not None:
             factor = self.resize_width / frame.shape[1]
             frame = cv2.resize(frame, (0, 0), fx=factor, fy=factor)
         frame = frame[..., ::-1]
         frame = frame.transpose((2, 0, 1))  # HxWxC to CxHxW
         return torch.tensor(frame / 255.0, dtype=torch.float)
     
-    def create_template(self, frame, fretboard):
-        self.image0 = self.preprocess(frame)
-        self.feats0 = self.extractor.extract(self.image0.to(self.device))
-        self.fretboard0 = fretboard.copy()
-        if self.resize_width is not None:
-            factor = self.resize_width / frame.shape[1]
-            self.fretboard0.resize(factor)
+    def create_template(self, frame, detection_result):
+        if detection_result[0] is not None and detection_result[1] is not None:
+            fretboard = detection_result[0].copy()
+            hands = detection_result[1]
+            cropped_frame, crop_mat = utils.crop_from_oriented_bb(frame, fretboard.oriented_bb)
+            cropped_hand = utils.transform_points(hands[0], crop_mat)
+            
+            mask = np.zeros((cropped_frame.shape[0], cropped_frame.shape[1]))
+            lines = [[0, 1], [1, 2], [2, 3], [3, 4], 
+                     [0, 5], [5, 6], [6, 7], [7, 8], 
+                     [5, 9], [9, 10], [10, 11], [11, 12], 
+                     [9, 13], [13, 14], [14, 15], [15, 16], 
+                     [0, 17], [13, 17], [17, 18], [18, 19], [19, 20]]
+            for idx_pair in lines:
+                cv2.line(mask, cropped_hand[idx_pair[0], :].astype(int), cropped_hand[idx_pair[1], :].astype(int), 255, 1)
+            
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+            mask = cv2.dilate(mask, kernel, iterations=1)
+            mask = 255 - mask
+
+            self.fretboard0 = fretboard
+            self.fretboard0.frets = utils.transform_houghlines(self.fretboard0.frets, np.linalg.inv(crop_mat))
+            self.fretboard0.strings = utils.transform_houghlines(self.fretboard0.strings, np.linalg.inv(crop_mat))
+
+            self.image0 = self.preprocess(cropped_frame, is_resize=False)
+            self.feats0 = self.extractor.extract(self.image0.to(self.device), torch.tensor(mask / 255.0, dtype=torch.float).to(self.device))
+            self.image0_size = self.feats0["image_size"].cpu().numpy()[0].astype(int)
+
+            resize_mat = np.array([
+                [self.image0_size[0]/cropped_frame.shape[1], 0, 0],
+                [0, self.image0_size[1]/cropped_frame.shape[0], 0], 
+                [0, 0, 1]
+            ])
+            self.fretboard0.frets = utils.transform_houghlines(self.fretboard0.frets, np.linalg.inv(resize_mat))
+            self.fretboard0.strings = utils.transform_houghlines(self.fretboard0.strings, np.linalg.inv(resize_mat))
+        else:
+            self.image0 = self.preprocess(frame)
+            self.fretboard0 = detection_result[0].copy()
+            self.feats0 = self.extractor.extract(self.image0.to(self.device))
+            if self.resize_width is not None:
+                factor = self.resize_width / frame.shape[1]
+                self.fretboard0.resize(factor)
+            assert('broken implementation')
     
     def filter_match0(self, m_kpts0):
         sign0 = self.fretboard0.strings[0][0] - m_kpts0[:, 0]*np.cos(self.fretboard0.strings[0][1]) - m_kpts0[:, 1]*np.sin(self.fretboard0.strings[0][1])
@@ -403,6 +441,8 @@ class TrackerLightGlue(TrackerInterface):
         # with cProfile.Profile() as profile:
         image1 = self.preprocess(frame)
         feats1 = self.extractor.extract(image1.to(self.device))
+        if self.image1_size is None:
+            self.image1_size = feats1["image_size"].cpu().numpy()[0].astype(int)
 
         matches01 = self.matcher({"image0": self.feats0, "image1": feats1})
         feats0_, feats1_, matches01_ = [
@@ -412,12 +452,24 @@ class TrackerLightGlue(TrackerInterface):
         kpts0, kpts1, matches = feats0_["keypoints"], feats1_["keypoints"], matches01_["matches"]
         m_kpts0, m_kpts1 = kpts0[matches[..., 0]].cpu().numpy(), kpts1[matches[..., 1]].cpu().numpy()
 
-        filtered = self.filter_match0(m_kpts0)
+        from video_processing.utils.visualize import draw_houghline_batch
+        after = frame.copy()
+        # after = cv2.resize(frame, (self.image1_size[0], self.image1_size[1]))
+        for kp in m_kpts1:
+            cv2.circle(after, kp.astype(int), 3, (0, 255, 0))
 
-        M, mask = cv2.findHomography(m_kpts0[filtered, :], m_kpts1[filtered, :], cv2.RANSAC, 5.0)
+        resize_mat = np.array([
+            [frame.shape[1] / self.image1_size[0], 0, 0],
+            [0, frame.shape[0] / self.image1_size[1], 0], 
+            [0, 0, 1]
+        ])
 
-        now_frets = utils.transform_houghlines(self.fretboard0.frets, np.linalg.inv(M))
-        now_strings = utils.transform_houghlines(self.fretboard0.strings, np.linalg.inv(M))
+        # filtered = self.filter_match0(m_kpts0)
+
+        M, mask = cv2.findHomography(m_kpts0, m_kpts1, cv2.RANSAC, 5.0)
+
+        now_frets = utils.transform_houghlines(self.fretboard0.frets, np.linalg.inv(resize_mat @ M))
+        now_strings = utils.transform_houghlines(self.fretboard0.strings, np.linalg.inv(resize_mat @ M))
 
         rect = utils.oriented_bb_from_frets_strings(now_frets, now_strings)
         rect = (rect[0], (rect[1][0] + 50, rect[1][1] + 100), rect[2])
@@ -426,7 +478,7 @@ class TrackerLightGlue(TrackerInterface):
         # results.dump_stats('results.prof')
         
         now_fretboard = Fretboard(now_frets, now_strings, rect)
-        if self.resize_width is not None:
-            factor = self.resize_width / frame.shape[1]
-            now_fretboard.resize(1/factor)
+        # if self.resize_width is not None:
+        #     factor = self.resize_width / frame.shape[1]
+        #     now_fretboard.resize(1/factor)
         return True, now_fretboard
