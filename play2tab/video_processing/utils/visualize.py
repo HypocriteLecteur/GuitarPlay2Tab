@@ -70,5 +70,5 @@ def dashed_vertical_line(img, x, y0, y1, color, stroke=5, gap=5):
 def draw_houghlineP_batch(cdst, linesP):
     if linesP is not None:
         for i in range(0, len(linesP)):
-            l = linesP[i][0]
+            l = linesP[i][0].astype(int)
             cv2.line(cdst, (l[0], l[1]), (l[2], l[3]), (0,255,0), 1, cv2.LINE_AA)

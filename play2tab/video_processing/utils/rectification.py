@@ -201,10 +201,10 @@ def ransac_vanishing_point(edgelets, num_ransac_iter=2000, threshold_inlier=5):
         if current_votes.sum() > best_votes.sum():
             best_model = current_model
             best_votes = current_votes
-            logging.info("Current best model has {} votes at iteration {}".format(
-                current_votes.sum(), ransac_iter))
+            # logging.info("Current best model has {} votes at iteration {}".format(
+            #     current_votes.sum(), ransac_iter))
 
-    return best_model
+    return best_model, np.argwhere(current_votes).squeeze()
 
 
 def reestimate_model(model, edgelets, threshold_reestimate=5):
@@ -239,8 +239,8 @@ def reestimate_model(model, edgelets, threshold_reestimate=5):
 
     a = lines[:, :2]
     b = -lines[:, 2]
-    est_model = np.linalg.lstsq(a, b)[0]
-    return np.concatenate((est_model, [1.]))
+    est_model = np.linalg.lstsq(a, b, rcond=None)[0]
+    return np.concatenate((est_model, [1.])), inliers
 
 
 def vis_edgelets(image, edgelets, show=True):
@@ -312,9 +312,9 @@ def rectify_image(image, clip_factor=6,
     edgelets1 = compute_edgelets(image)
 
     # Find first vanishing point
-    vp1 = ransac_vanishing_point(edgelets1, 2000, threshold_inlier=5)
+    vp1, _ = ransac_vanishing_point(edgelets1, 2000, threshold_inlier=5)
     if reestimate:
-        vp1 = reestimate_model(vp1, edgelets1, 5)
+        vp1, _ = reestimate_model(vp1, edgelets1, 5)
 
 
 if __name__ == '__main__':
@@ -327,9 +327,9 @@ if __name__ == '__main__':
     lsd_linesP = lsd_linesP[3*np.abs(lsd_linesP[:, 0, 0] - lsd_linesP[:, 0, 2]) <= np.abs(lsd_linesP[:, 0, 1] - lsd_linesP[:, 0, 3]), ...]
     edgelets1 = edgelets_from_linesP(lsd_linesP)
     
-    vp1 = ransac_vanishing_point(edgelets1, 2000, threshold_inlier=5)
+    vp1, _ = ransac_vanishing_point(edgelets1, 2000, threshold_inlier=5)
     print(vp1 / vp1[2])
-    vp1 = reestimate_model(vp1, edgelets1, 5)
+    vp1, _ = reestimate_model(vp1, edgelets1, 5)
     print(vp1)
 
     vis_model(frame, edgelets1, vp1)

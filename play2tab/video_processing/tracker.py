@@ -10,6 +10,7 @@ from sklearn.linear_model import RANSACRegressor, LinearRegression
 import matplotlib.pyplot as plt
 from skimage.feature import peak_local_max
 from pathlib import Path
+import matplotlib.cm as cm
 
 from .utils import utils_math as utils
 from .utils.visualize import draw_houghline_batch, draw_fretboard, draw_houghlineP_batch
@@ -276,7 +277,7 @@ class Tracker(TrackerInterface):
             # cv2.imshow('strings cdst', cdst)
         return upper_line, mid_line, lower_line
 
-    def track(self, frame: MatLike, fgmask: MatLike, fretboard: Tuple, is_visualize=False) -> Tuple[bool, Union[Fretboard, None]]:
+    def track(self, frame: MatLike, fretboard, fgmask: MatLike=None, is_visualize=False) -> Tuple[bool, Union[Fretboard, None]]:
         '''
         Tracking Pipeline:
         1. Mask out background
@@ -366,7 +367,6 @@ class TrackerLightGlue(TrackerInterface):
         self.fretboard0 = None
 
         self.resize_width = resize_width
-
         self.image1_size = None
         
     def preprocess(self, frame, is_resize=True):
@@ -377,34 +377,45 @@ class TrackerLightGlue(TrackerInterface):
         frame = frame.transpose((2, 0, 1))  # HxWxC to CxHxW
         return torch.tensor(frame / 255.0, dtype=torch.float)
     
+    def hand_mask(self, cropped_frame, cropped_hand):
+        mask = np.zeros((cropped_frame.shape[0], cropped_frame.shape[1]))
+        lines = [[0, 1], [1, 2], [2, 3], [3, 4], 
+                    [0, 5], [5, 6], [6, 7], [7, 8], 
+                    [5, 9], [9, 10], [10, 11], [11, 12], 
+                    [9, 13], [13, 14], [14, 15], [15, 16], 
+                    [0, 17], [13, 17], [17, 18], [18, 19], [19, 20]]
+        for idx_pair in lines:
+            cv2.line(mask, cropped_hand[idx_pair[0], :].astype(int), cropped_hand[idx_pair[1], :].astype(int), 255, 1)
+        
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+        mask = cv2.dilate(mask, kernel, iterations=1)
+        mask = 255 - mask
+        return mask
+    
     def create_template(self, frame, detection_result):
-        if detection_result[0] is not None and detection_result[1] is not None:
+        if detection_result[0] is not None:
             fretboard = detection_result[0].copy()
-            hands = detection_result[1]
+
             cropped_frame, crop_mat = utils.crop_from_oriented_bb(frame, fretboard.oriented_bb)
-            cropped_hand = utils.transform_points(hands[0], crop_mat)
-            
-            mask = np.zeros((cropped_frame.shape[0], cropped_frame.shape[1]))
-            lines = [[0, 1], [1, 2], [2, 3], [3, 4], 
-                     [0, 5], [5, 6], [6, 7], [7, 8], 
-                     [5, 9], [9, 10], [10, 11], [11, 12], 
-                     [9, 13], [13, 14], [14, 15], [15, 16], 
-                     [0, 17], [13, 17], [17, 18], [18, 19], [19, 20]]
-            for idx_pair in lines:
-                cv2.line(mask, cropped_hand[idx_pair[0], :].astype(int), cropped_hand[idx_pair[1], :].astype(int), 255, 1)
-            
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
-            mask = cv2.dilate(mask, kernel, iterations=1)
-            mask = 255 - mask
+
+            if detection_result[1] is not None:
+                hands = detection_result[1]            
+                cropped_hand = utils.transform_points(hands[0], crop_mat)
+                mask = self.hand_mask(cropped_frame, cropped_hand)
 
             self.fretboard0 = fretboard
             self.fretboard0.frets = utils.transform_houghlines(self.fretboard0.frets, np.linalg.inv(crop_mat))
             self.fretboard0.strings = utils.transform_houghlines(self.fretboard0.strings, np.linalg.inv(crop_mat))
 
-            self.image0 = self.preprocess(cropped_frame, is_resize=False)
-            self.feats0 = self.extractor.extract(self.image0.to(self.device), torch.tensor(mask / 255.0, dtype=torch.float).to(self.device))
+            image0 = self.preprocess(cropped_frame, is_resize=False)
+            if detection_result[1] is not None:
+                self.feats0 = self.extractor.extract(image0.to(self.device), torch.tensor(mask / 255.0, dtype=torch.float).to(self.device))
+            else:
+                self.feats0 = self.extractor.extract(image0.to(self.device))
             self.image0_size = self.feats0["image_size"].cpu().numpy()[0].astype(int)
+            self.cropped_frame = cropped_frame
 
+            # Superpoint extractor will resize image
             resize_mat = np.array([
                 [self.image0_size[0]/cropped_frame.shape[1], 0, 0],
                 [0, self.image0_size[1]/cropped_frame.shape[0], 0], 
@@ -413,32 +424,26 @@ class TrackerLightGlue(TrackerInterface):
             self.fretboard0.frets = utils.transform_houghlines(self.fretboard0.frets, np.linalg.inv(resize_mat))
             self.fretboard0.strings = utils.transform_houghlines(self.fretboard0.strings, np.linalg.inv(resize_mat))
         else:
-            self.image0 = self.preprocess(frame)
-            self.fretboard0 = detection_result[0].copy()
-            self.feats0 = self.extractor.extract(self.image0.to(self.device))
-            if self.resize_width is not None:
-                factor = self.resize_width / frame.shape[1]
-                self.fretboard0.resize(factor)
-            assert('broken implementation')
-    
+            assert('no fretboard detected')
+
     def filter_match0(self, m_kpts0):
         sign0 = self.fretboard0.strings[0][0] - m_kpts0[:, 0]*np.cos(self.fretboard0.strings[0][1]) - m_kpts0[:, 1]*np.sin(self.fretboard0.strings[0][1])
         sign1 = self.fretboard0.strings[-1][0] - m_kpts0[:, 0]*np.cos(self.fretboard0.strings[-1][1]) - m_kpts0[:, 1]*np.sin(self.fretboard0.strings[-1][1])
-        sign2 = self.fretboard0.frets[0][0] - m_kpts0[:, 0]*np.cos(self.fretboard0.frets[0][1]) - m_kpts0[:, 1]*np.sin(self.fretboard0.frets[0][1])
-        sign3 = self.fretboard0.frets[-1][0] - m_kpts0[:, 0]*np.cos(self.fretboard0.frets[-1][1]) - m_kpts0[:, 1]*np.sin(self.fretboard0.frets[-1][1])
+        # sign2 = self.fretboard0.frets[0][0] - m_kpts0[:, 0]*np.cos(self.fretboard0.frets[0][1]) - m_kpts0[:, 1]*np.sin(self.fretboard0.frets[0][1])
+        # sign3 = self.fretboard0.frets[-1][0] - m_kpts0[:, 0]*np.cos(self.fretboard0.frets[-1][1]) - m_kpts0[:, 1]*np.sin(self.fretboard0.frets[-1][1])
 
         sign0 = np.sign(sign0)
         sign1 = np.sign(sign1)
-        sign2 = np.sign(sign2)
-        sign3 = np.sign(sign3)
+        # sign2 = np.sign(sign2)
+        # sign3 = np.sign(sign3)
 
-        filtered = np.logical_and(sign0 * sign1 < 0, sign2 * sign3 < 0)
+        # filtered = np.logical_and(sign0 * sign1 < 0, sign2 * sign3 < 0)
+        filtered = sign0 * sign1 < 0
         return filtered
 
-    def track(self, frame: MatLike, is_visualize=False) -> Tuple[bool, Union[Fretboard, None]]:
-        # import cProfile
-        # import pstats
-        # with cProfile.Profile() as profile:
+    def track(self, frame: MatLike, fretboard=None, is_visualize=False):
+        if fretboard is not None:
+            frame, crop_transform = utils.crop_from_oriented_bb(frame, fretboard.oriented_bb)
         image1 = self.preprocess(frame)
         feats1 = self.extractor.extract(image1.to(self.device))
         if self.image1_size is None:
@@ -447,38 +452,116 @@ class TrackerLightGlue(TrackerInterface):
         matches01 = self.matcher({"image0": self.feats0, "image1": feats1})
         feats0_, feats1_, matches01_ = [
             self.rbd(x) for x in [self.feats0, feats1, matches01]
-        ]  # remove batch dimension
+        ]
 
         kpts0, kpts1, matches = feats0_["keypoints"], feats1_["keypoints"], matches01_["matches"]
         m_kpts0, m_kpts1 = kpts0[matches[..., 0]].cpu().numpy(), kpts1[matches[..., 1]].cpu().numpy()
+        
+        filter_ind = self.filter_match0(m_kpts0)
+        m_kpts0 = m_kpts0[filter_ind]
+        m_kpts1 = m_kpts1[filter_ind]
 
-        from video_processing.utils.visualize import draw_houghline_batch
-        after = frame.copy()
-        # after = cv2.resize(frame, (self.image1_size[0], self.image1_size[1]))
-        for kp in m_kpts1:
-            cv2.circle(after, kp.astype(int), 3, (0, 255, 0))
+        if m_kpts0.shape[0] == 0:
+            return False, None
 
+        # sort matched keypoints for drawing and debuggin
+        sort_ind = np.argsort(m_kpts0[:, 0])
+        m_kpts0 = m_kpts0[sort_ind, :]
+        m_kpts1 = m_kpts1[sort_ind, :]
+
+        M, mask = cv2.findHomography(m_kpts0, m_kpts1, cv2.RANSAC, 5.0)
+
+        # account for resizing in Superpoint
         resize_mat = np.array([
             [frame.shape[1] / self.image1_size[0], 0, 0],
             [0, frame.shape[0] / self.image1_size[1], 0], 
             [0, 0, 1]
         ])
-
-        # filtered = self.filter_match0(m_kpts0)
-
-        M, mask = cv2.findHomography(m_kpts0, m_kpts1, cv2.RANSAC, 5.0)
-
-        now_frets = utils.transform_houghlines(self.fretboard0.frets, np.linalg.inv(resize_mat @ M))
-        now_strings = utils.transform_houghlines(self.fretboard0.strings, np.linalg.inv(resize_mat @ M))
+        if fretboard is not None:
+            now_frets = utils.transform_houghlines(self.fretboard0.frets, np.linalg.inv(np.linalg.inv(crop_transform) @ resize_mat @ M))
+            now_strings = utils.transform_houghlines(self.fretboard0.strings, np.linalg.inv(np.linalg.inv(crop_transform) @ resize_mat @ M))
+        else:
+            now_frets = utils.transform_houghlines(self.fretboard0.frets, np.linalg.inv(resize_mat @ M))
+            now_strings = utils.transform_houghlines(self.fretboard0.strings, np.linalg.inv(resize_mat @ M))
 
         rect = utils.oriented_bb_from_frets_strings(now_frets, now_strings)
         rect = (rect[0], (rect[1][0] + 50, rect[1][1] + 100), rect[2])
-        # results = pstats.Stats(profile)
-        # results.sort_stats(pstats.SortKey.TIME)
-        # results.dump_stats('results.prof')
         
         now_fretboard = Fretboard(now_frets, now_strings, rect)
-        # if self.resize_width is not None:
-        #     factor = self.resize_width / frame.shape[1]
-        #     now_fretboard.resize(1/factor)
+        if is_visualize:
+            from video_processing.utils.visualize import draw_houghline_batch
+            before = cv2.resize(self.cropped_frame, (self.image0_size[0], self.image0_size[1]))
+            draw_houghline_batch(before, self.fretboard0.frets)
+            draw_houghline_batch(before, self.fretboard0.strings)
+
+            after = frame.copy()
+            if fretboard is not None:
+                draw_houghline_batch(after, utils.transform_houghlines(now_fretboard.frets, np.linalg.inv(crop_transform)))
+                draw_houghline_batch(after, utils.transform_houghlines(now_fretboard.strings, np.linalg.inv(crop_transform)))
+            else:
+                draw_houghline_batch(after, now_fretboard.frets)
+                draw_houghline_batch(after, now_fretboard.strings)
+            after = cv2.resize(after, (self.image1_size[0], self.image1_size[1]))\
+            
+            final = draw_matches(before, m_kpts0, after, m_kpts1, np.repeat(np.arange(m_kpts0.shape[0]).reshape(-1,1), 2, axis=1))
+            cv2.imshow('final', final)
+            cv2.waitKey(1)
         return True, now_fretboard
+
+# ------------------------------------------------------------------------
+# drawing and debugging
+def draw_matches(img1, kp1, img2, kp2, matches): 
+    """Draws lines between matching keypoints of two images.  
+    Keypoints not in a matching pair are not drawn.
+    Places the images side by side in a new image and draws circles 
+    around each keypoint, with line segments connecting matching pairs.
+    You can tweak the r, thickness, and figsize values as needed.
+    Args:
+        img1: An openCV image ndarray in a grayscale or color format.
+        kp1: ndarray [n1, 2]
+        img2: An openCV image ndarray of the same format and with the same 
+        element type as img1.
+        kp2: ndarray [n2, 2]
+        matches: ndarray [n_match, 2]
+        img1 keypoints and whose queryIdx attribute refers to img2 keypoints.
+        color: The color of the circles and connecting lines drawn on the images.  
+        A 3-tuple for color images, a scalar for grayscale images.  If None, these
+        values are randomly generated.  
+    """
+    # We're drawing them side by side.  Get dimensions accordingly.
+    # Handle both color and grayscale images.
+    if len(img1.shape) == 3:
+        new_shape = (max(img1.shape[0], img2.shape[0]), img1.shape[1]+img2.shape[1], img1.shape[2])
+    elif len(img1.shape) == 2:
+        new_shape = (max(img1.shape[0], img2.shape[0]), img1.shape[1]+img2.shape[1])
+    new_img = np.zeros(new_shape, type(img1.flat[0]))  
+    # Place images onto the new image.
+    new_img[0:img1.shape[0],0:img1.shape[1]] = img1
+    new_img[0:img2.shape[0],img1.shape[1]:img1.shape[1]+img2.shape[1]] = img2
+    
+    # Draw lines between matches.  Make sure to offset kp coords in second image appropriately.
+    r = 5
+    thickness = 1
+    for i, m in enumerate(matches):
+        c = map_integer_to_color(i, 0, matches.shape[0])
+        # So the keypoint locs are stored as a tuple of floats.  cv2.line(), like most other things,
+        # wants locs as a tuple of ints.
+        end1 = tuple(np.round(kp1[m[0]]).astype(int))
+        end2 = tuple(np.round(kp2[m[1]]).astype(int) + np.array([img1.shape[1], 0]))
+        # cv2.line(new_img, end1, end2, c, thickness)
+        cv2.circle(new_img, end1, r, c, thickness)
+        cv2.circle(new_img, end2, r, c, thickness)
+    return new_img
+
+def map_integer_to_color(value, a, b):
+    # Ensure value is within the range [a, b]
+    if value < a or value > b:
+        raise ValueError(f"value must be between {a} and {b}")
+    
+    # Normalize the value to the range [0, 1]
+    normalized_value = (value - a) / (b - a)
+    
+    # Map the normalized value to a color (RGBA)
+    color = cm.viridis(normalized_value)
+    
+    return (int(color[0]*255), int(color[1]*255), int(color[2]*255))

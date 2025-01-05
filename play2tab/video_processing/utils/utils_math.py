@@ -53,6 +53,18 @@ def find_longest_consecutive_subset(input_list: List, condition: Callable) -> Li
         return 0, []
     return max_subset_begin_index, max_subset
 
+def find_consecutive_groups(data):
+    from itertools import groupby
+    from operator import itemgetter
+
+    ranges =[]
+
+    for k,g in groupby(enumerate(data),lambda x:x[0]-x[1]):
+        group = (map(itemgetter(1),g))
+        group = list(map(int,group))
+        ranges.append(group)
+    return ranges
+
 def autocorr(x):
     result = np.correlate(x, x, mode='full')
     return result[result.size//2:]
@@ -136,7 +148,7 @@ def line_magnitude(x1, y1, x2, y2):
     return line_magnitude
 
 @numba.njit
-def distance_point_to_line(px, py, line):
+def distance_point_to_line(px, py, line, extend_percentage):
     x1, y1, x2, y2 = line
 
     lmag = line_magnitude(x1, y1, x2, y2)
@@ -146,7 +158,7 @@ def distance_point_to_line(px, py, line):
     u1 = ((px - x1) * (x2 - x1)) + ((py - y1) * (y2 - y1))
     u = u1 / (lmag ** 2)
 
-    if u < -0.5 or u > 1.5:
+    if u < -extend_percentage or u > 1+extend_percentage:
         # Closest point does not fall within the line segment
         ix = line_magnitude(px, py, x1, y1)
         iy = line_magnitude(px, py, x2, y2)
@@ -158,11 +170,11 @@ def distance_point_to_line(px, py, line):
         return line_magnitude(px, py, ix, iy)
 
 @numba.njit
-def get_distance(a_line, b_line):
-    dist1 = distance_point_to_line(a_line[0], a_line[1], b_line)
-    dist2 = distance_point_to_line(a_line[2], a_line[3], b_line)
-    dist3 = distance_point_to_line(b_line[0], b_line[1], a_line)
-    dist4 = distance_point_to_line(b_line[2], b_line[3], a_line)
+def get_distance(a_line, b_line, extend_percentage):
+    dist1 = distance_point_to_line(a_line[0], a_line[1], b_line, extend_percentage)
+    dist2 = distance_point_to_line(a_line[2], a_line[3], b_line, extend_percentage)
+    dist3 = distance_point_to_line(b_line[0], b_line[1], a_line, extend_percentage)
+    dist4 = distance_point_to_line(b_line[2], b_line[3], a_line, extend_percentage)
     return min(dist1, dist2, dist3, dist4)
 
 @numba.njit
@@ -170,10 +182,10 @@ def get_orientation(line):
     orientation = math.atan2(abs(line[3] - line[1]), abs(line[2] - line[0]))
     return math.degrees(orientation)
 
-def check_is_line_different(line_1, groups, min_distance_to_merge, min_angle_to_merge):
+def check_is_line_different(line_1, groups, min_distance_to_merge, min_angle_to_merge, extend_percentage):
     for group in groups:
         for line_2 in group:
-            if get_distance(line_2, line_1) < min_distance_to_merge:
+            if get_distance(line_2, line_1, extend_percentage) < min_distance_to_merge:
                 orientation_1 = get_orientation(line_1)
                 orientation_2 = get_orientation(line_2)
                 if abs(orientation_1 - orientation_2) < min_angle_to_merge:
@@ -184,9 +196,10 @@ def check_is_line_different(line_1, groups, min_distance_to_merge, min_angle_to_
 from numba.typed import List
 
 class HoughBundler:
-    def __init__(self,min_distance=5,min_angle=2):
+    def __init__(self,min_distance=5, min_angle=4, extend_percentage=0.5):
         self.min_distance = min_distance
         self.min_angle = min_angle
+        self.extend_percentage = extend_percentage
 
     def merge_lines_into_groups(self, lines):
         groups = [] # all lines groups are here
@@ -194,7 +207,7 @@ class HoughBundler:
         groups.append([lines[0]])
         # if line is different from existing gropus, create a new group
         for line_new in lines[1:]:
-            if check_is_line_different(line_new, groups, self.min_distance, self.min_angle):
+            if check_is_line_different(line_new, groups, self.min_distance, self.min_angle, self.extend_percentage):
                 groups.append([line_new])
 
         return groups
@@ -366,8 +379,8 @@ def line_line_intersection(l1, l2):
     return tmp[:2] / tmp[2]
 
 def line_line_intersection_batch(lines, l2):
-    tmp = np.cross([np.cos(lines[:, 1]), np.sin(lines[:, 1]), -lines[:, 0]], [np.cos(l2[1]), np.sin(l2[1]), -l2[0]])
-    return tmp[:2] / tmp[2]
+    tmp = np.cross(np.vstack((np.cos(lines[:, 1]), np.sin(lines[:, 1]), -lines[:, 0])).T, [np.cos(l2[1]), np.sin(l2[1]), -l2[0]])
+    return tmp[:, :2] / tmp[:, 2].reshape((-1,1))
 
 def cornerpoints_from_frets_strings(frets: NDArray, strings: NDArray) -> NDArray:
     cornerpoints = np.array([
@@ -450,20 +463,19 @@ def ransac_vanishing_point_estimation_lines(lines):
     vanishing_point = ransac_lm.estimator_.coef_
     return vanishing_point, ransac_lm.inlier_mask_
 
-# Not robust
 # --------------------------------------------
-# def find_projective_rectification(vp):
-#     homography = np.array([
-#         [1, 0, 0], 
-#         [0, 1, 0], 
-#         [0, -1/vp[1], 1]
-#     ])
-#     affine = np.array([
-#         [1, -vp[0] / vp[1], 0],
-#         [0, 1, 0],
-#         [0, 0, 1]
-#     ])
-#     return affine @ homography
+def find_one_point_rectification(vp):
+    homography = np.array([
+        [1, 0, 0], 
+        [0, 1, 0], 
+        [0, -1/vp[1], 1]
+    ])
+    affine = np.array([
+        [1, -vp[0] / vp[1], 0],
+        [0, 1, 0],
+        [0, 0, 1]
+    ])
+    return affine @ homography
 # --------------------------------------------
 
 def find_rectification(lines, shape):
@@ -486,8 +498,8 @@ def compute_homography(image, vp1, vp2, clip=True):
     It is assumed that vp1 and vp2 correspond to horizontal and vertical
     directions, although the order is not assumed.
     Firstly, projective transform is computed to make the vanishing points go
-    to infinty so that we have a fronto parellel view. Then,Computes affine
-    transfom  to make axes corresponding to vanishing points orthogonal.
+    to infinty so that we have a fronto parellel view. Then, Computes affine
+    transfom to make axes corresponding to vanishing points orthogonal.
     Finally, Image is translated so that the image is not missed. Note that
     this image can be very large. `clip` is provided to deal with this.
 

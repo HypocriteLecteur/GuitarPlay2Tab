@@ -29,13 +29,13 @@ pip install .
 ## Usage
 A test video is provided in `test/guitar4.mp4`.
 
-You can either run a non-gui demo with:
-```
-python ./play2tab/fretboard_detection.py
-```
-or a gui demo with:
+You can either run a gui demo with (recommended):
 ```
 python ./play2tab/gui/gui.py
+```
+or a non-gui demo with (not up-to-date):
+```
+python ./play2tab/fretboard_detection.py
 ```
 
 ## Using Docker (Windows 11)
@@ -61,4 +61,4 @@ docker run --rm --gpus=all guitarplay2tab
 5. Remember to rebuild image if change is made to the source code, this shouldn't take long if there's an available build cache.
 
 ## Known Issue
-1. During tracking, dragging the gui window will cause tracking failure.
+1. During tracking, dragging the gui window may cause tracking failure.
