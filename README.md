@@ -61,4 +61,4 @@ docker run --rm --gpus=all guitarplay2tab
 5. Remember to rebuild image if change is made to the source code, this shouldn't take long if there's an available build cache.
 
 ## Known Issue
-1. During tracking, dragging the gui window may cause tracking failure.
+1. During tracking, dragging the gui window may cause tracking failure, likely a PyQT issue.
