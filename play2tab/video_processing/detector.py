@@ -117,9 +117,9 @@ class Detector(DetectorInterface):
         # line_on_image = lsd.drawSegments(gray, linesP_vertical)
         # cv2.imshow('total lsd lines', line_on_image)
         # vis_model(gray, edgelets1, vp_frets)
-        return vp_frets[:2], linesP_vertical[vp_inliers]
+        return vp_frets, linesP_vertical[vp_inliers]
     
-    def find_frets_vanishing_point_with_houghlines(edges: MatLike, theta_range=20/180*np.pi):
+    def find_frets_vanishing_point_with_houghlines(self, edges: MatLike, theta_range=20/180*np.pi):
         tested_angles = np.linspace(-theta_range, theta_range, 20, endpoint=False)
         h, theta, d = hough_line(edges, theta=tested_angles)
         hspace, angles, dists = hough_line_peaks(h, theta, d, min_distance=9, min_angle=10)
@@ -259,7 +259,7 @@ class Detector(DetectorInterface):
         if vp_frets is None:
             return None
 
-        homography = utils.find_one_point_rectification(vp_frets[:2])
+        homography = utils.find_one_point_rectification(vp_frets)
 
         second_rect_gray = cv2.warpPerspective(gray, homography, gray.shape[1::-1], flags=cv2.INTER_LINEAR)
         frets_inlier[:, :2] = utils.transform_points(frets_inlier[:, :2], homography)
@@ -438,7 +438,7 @@ class Detector(DetectorInterface):
             return DetectorStatus.vanishing_point_not_detected, None
         
         vp_strings = utils.line_line_intersection(cropped_fretboard_boundaries[0], cropped_fretboard_boundaries[1])
-        homography = utils.compute_homography(cropped_gray, np.hstack((vp_strings, 1)), np.hstack((vp_frets, 1)), clip=True)
+        homography = utils.compute_homography(cropped_gray, np.hstack((vp_strings, 1)), vp_frets, clip=True)
         if homography is None:
             return DetectorStatus.homography_not_detected, None
         

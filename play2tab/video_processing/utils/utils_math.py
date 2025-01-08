@@ -453,7 +453,7 @@ def ransac_vanishing_point_estimation(linesP):
     ransac_lm = RANSACRegressor(estimator=LinearRegression(fit_intercept=False))
     ransac_lm.fit(line_coords[:, :2], -line_coords[:, 2])
     vanishing_point = ransac_lm.estimator_.coef_
-    return vanishing_point, ransac_lm.inlier_mask_
+    return np.array([vanishing_point[0], vanishing_point[1], 1]), ransac_lm.inlier_mask_
 
 def ransac_vanishing_point_estimation_lines(lines):
     line_coords = np.vstack((np.cos(lines[:, 1]), np.sin(lines[:, 1]), -lines[:, 0])).T
@@ -461,14 +461,29 @@ def ransac_vanishing_point_estimation_lines(lines):
     ransac_lm = RANSACRegressor(estimator=LinearRegression(fit_intercept=False))
     ransac_lm.fit(line_coords[:, :2], -line_coords[:, 2])
     vanishing_point = ransac_lm.estimator_.coef_
-    return vanishing_point, ransac_lm.inlier_mask_
+    return np.array([vanishing_point[0], vanishing_point[1], 1]), ransac_lm.inlier_mask_
+
+def another_ransac_vanishing_point_estimation_lines(lines):
+    angles = lines[:, 1]
+    dists = lines[:, 0]
+
+    ransac_lm = RANSACRegressor(estimator=LinearRegression(fit_intercept=True))
+    ransac_lm.fit(dists.reshape((-1,1)), angles.reshape((-1,1)))
+    k = ransac_lm.estimator_.coef_[0, 0]
+    b = ransac_lm.estimator_.intercept_[0]
+    inliers = ransac_lm.inlier_mask_
+
+    A_inv = -k
+    phi = b - np.pi/2
+    vp = np.array([np.cos(phi), np.sin(phi), A_inv])
+    return vp, inliers
 
 # --------------------------------------------
 def find_one_point_rectification(vp):
     homography = np.array([
         [1, 0, 0], 
         [0, 1, 0], 
-        [0, -1/vp[1], 1]
+        [0, -vp[2]/vp[1], 1]
     ])
     affine = np.array([
         [1, -vp[0] / vp[1], 0],

@@ -209,6 +209,8 @@ class VideoPlayer(QMainWindow):
         
         self.dir = None
 
+        self.load_data()
+
     def setup_ui(self):
         self.setWindowTitle("PyQt6 Video Player")
         self.setGeometry(100, 100, 800, 600)
@@ -221,13 +223,15 @@ class VideoPlayer(QMainWindow):
         for name, func in [ 
                            ("Detect", self.detect_objects), 
                            ("Track", self.track_objects),
+                           ("Refine Tracks", self.refine_tracks),
                            ("Outlier Detection", self.detect_outliers),
                            ('Retrack Outliers', self.retrack_outliers),
                            ('Inspect Track', self.inspect_track),
-                           ("AMT", self.audio_to_midi),
-                           ("show_midi", self.show_midi),
-                           ("show_tab", self.show_tab),
-                           ("midi_to_tab", self.midi_to_tab)]:
+                        #    ("AMT", self.audio_to_midi),
+                        #    ("show_midi", self.show_midi),
+                        #    ("show_tab", self.show_tab),
+                        #    ("midi_to_tab", self.midi_to_tab)
+                           ]:
             button = QPushButton(name)
             button.clicked.connect(func)
             sidebar_layout.addWidget(button)
@@ -279,6 +283,8 @@ class VideoPlayer(QMainWindow):
         if event.key() == Qt.Key.Key_Q:
             if self.worker is not None:
                 self.track_flag = False
+            current_frame = self.slider.value()
+            self.slider.setValue(current_frame-1)
         
         if event.key() == Qt.Key.Key_F:
             self.drawing_enabled = True
@@ -303,13 +309,9 @@ class VideoPlayer(QMainWindow):
                 return
             self.slider.setValue(greater_outlier_frames[0])
         
-        if event.key() == Qt.Key.Key_Right:
+        if event.key() == Qt.Key.Key_E:
             current_frame = self.slider.value()
             self.slider.setValue(current_frame+1)
-        
-        if event.key() == Qt.Key.Key_Left:
-            current_frame = self.slider.value()
-            self.slider.setValue(current_frame-1)
         
         if event.key() == Qt.Key.Key_B:
             current_frame = self.slider.value()
@@ -528,7 +530,6 @@ class VideoPlayer(QMainWindow):
         begin_frame = begin_frame + 1
         
         self.track_flag = True
-        from tqdm import tqdm
         try:
             # from cProfile import Profile
             # import pstats
@@ -554,7 +555,7 @@ class VideoPlayer(QMainWindow):
                 else:
                     break
                 self.detected_frames[i] = result
-                # self.slider.setValue(begin_frame)
+                self.slider.setValue(begin_frame)
                 self.slider.set_colored_marks(i, QColor("green"))
             # results = pstats.Stats(profile)
             # results.sort_stats(pstats.SortKey.TIME)
@@ -562,6 +563,25 @@ class VideoPlayer(QMainWindow):
         except Exception as e:
             print(e)
     
+    def refine_tracks(self):
+        begin_frame = min(list(self.detected_frames.keys())) + 1
+        try:
+            for i in tqdm(range(begin_frame, self.total_frames)):
+                if i in self.outlier_frames or i-1 in self.outlier_frames:
+                    continue
+                frame = self.read_frame(i)
+                if i-1 not in self.detected_frames or i not in self.detected_frames:
+                    continue
+
+                fretboard = self.detected_frames[i][0].copy()
+                fretboard.oriented_bb = self.detected_frames[i-1][0].oriented_bb
+                track_flag, fretboard = self.backup_tracker.track(frame, fretboard, is_track_strings=False, is_visualize=False)
+                if not track_flag:
+                    continue
+                self.detected_frames[i] = (fretboard, self.detected_frames[i][1])
+        except Exception as e:
+            print(e)
+
     def inspect_track(self):
         begin_frame = min(list(self.detected_frames.keys()))
         frame = self.read_frame(begin_frame)
@@ -570,9 +590,11 @@ class VideoPlayer(QMainWindow):
         begin_frame = self.slider.value()
         frame = self.read_frame(begin_frame)
         if begin_frame-1 not in self.detected_frames:
-            track_flag, fretboard = self.tracker.track(frame, is_visualize=False)
-        else:
-            track_flag, fretboard = self.tracker.track(frame, self.detected_frames[begin_frame-1][0], is_visualize=True)
+            return
+        fretboard = self.detected_frames[begin_frame][0].copy()
+        fretboard.oriented_bb = self.detected_frames[begin_frame-1][0].oriented_bb
+        fretboard.frets = self.detected_frames[begin_frame-1][0].frets
+        track_flag, fretboard = self.backup_tracker.track(frame, fretboard, is_track_strings=False, is_visualize=True)
 
         if track_flag:
             # hand_oriented_bb = (fretboard.oriented_bb[0], 
@@ -587,45 +609,66 @@ class VideoPlayer(QMainWindow):
                 result = (fretboard, hands)
             else:
                 result = (fretboard, None)
-            # self.detected_frames[begin_frame] = result
+            self.detected_frames[begin_frame] = result
+            self.display_frame(begin_frame)
     
     def track_objects(self):
         if len(self.detected_frames) == 0:
             return
-        self.worker = Worker(self.track_objects_) # Any other args, kwargs are passed to the run function
-        self.threadpool.start(self.worker)
-        # self.track_objects_()
+        # self.worker = Worker(self.track_objects_) # Any other args, kwargs are passed to the run function
+        # self.threadpool.start(self.worker)
+        self.track_objects_()
     
+    def check_outlier(self, key):
+        if key-1 not in self.detected_frames:
+            return False
+        fretboard_prev = self.detected_frames[key-1][0]
+        fretboard_now = self.detected_frames[key][0]
+        angle_diff = utils.angle_diff_np(fretboard_now.frets[:, 1], fretboard_prev.frets[:, 1])*180/np.pi
+        now_pnt1 = utils.line_line_intersection(fretboard_now.frets[0], fretboard_now.strings[0])
+        now_pnt2 = utils.line_line_intersection(fretboard_now.frets[-1], fretboard_now.strings[0])
+        # now_scale = np.linalg.norm(now_pnt1-now_pnt2)
+        prev_pnt1 = utils.line_line_intersection(fretboard_prev.frets[0], fretboard_prev.strings[0])
+        prev_pnt2 = utils.line_line_intersection(fretboard_prev.frets[-1], fretboard_prev.strings[0])
+        # prev_scale = np.linalg.norm(prev_pnt1-prev_pnt2)
+        # scale_diff = np.abs(now_scale - prev_scale) / prev_scale
+        pos_diff = np.max((np.linalg.norm(now_pnt1-prev_pnt1), np.linalg.norm(now_pnt2-prev_pnt2)))
+        if np.max(angle_diff) > 7 or pos_diff > 15:
+            return True
+        else:
+            return False
+
     def detect_outliers(self):
         self.outlier_frames = []
         self.slider.colored_marks = {k: QColor("green") for k in self.detected_frames}
 
         keys = list(self.detected_frames.keys())
         for key in keys[1:]:
-            if key-1 not in self.detected_frames:
-                continue
-            fretboard_prev = self.detected_frames[key-1][0]
-            fretboard_now = self.detected_frames[key][0]
-            
-            # check for sudden angle change
-            angle_diff = utils.angle_diff_np(fretboard_now.frets[:, 1], fretboard_prev.frets[:, 1])*180/np.pi
-            now_pnt1 = utils.line_line_intersection(fretboard_now.frets[0], fretboard_now.strings[0])
-            now_pnt2 = utils.line_line_intersection(fretboard_now.frets[-1], fretboard_now.strings[0])
-            # now_scale = np.linalg.norm(now_pnt1-now_pnt2)
-            prev_pnt1 = utils.line_line_intersection(fretboard_prev.frets[0], fretboard_prev.strings[0])
-            prev_pnt2 = utils.line_line_intersection(fretboard_prev.frets[-1], fretboard_prev.strings[0])
-            # prev_scale = np.linalg.norm(prev_pnt1-prev_pnt2)
-            # scale_diff = np.abs(now_scale - prev_scale) / prev_scale
-            pos_diff = np.max((np.linalg.norm(now_pnt1-prev_pnt1), np.linalg.norm(now_pnt2-prev_pnt2)))
-            if np.max(angle_diff) > 10 or pos_diff > 30:
+            is_outlier = self.check_outlier(key)
+            if is_outlier:
                 self.outlier_frames.append(key)
                 self.slider.set_colored_marks(key, QColor('Red'))
         print(f'a total of {len(self.outlier_frames)} outliers')
     
     def retrack_outliers(self):
-        for key in self.outlier_frames:
+        while len(self.outlier_frames) > 0:
+            key = self.outlier_frames.pop(0)
             self.slider.setValue(key)
-            self.inspect_track()
+
+            begin_frame = self.slider.value()
+            frame = self.read_frame(begin_frame)
+            if begin_frame-1 not in self.detected_frames:
+                continue
+            fretboard = self.detected_frames[begin_frame-1][0].copy()
+            fretboard.strings = self.detected_frames[begin_frame][0].strings
+            track_flag, fretboard = self.backup_tracker.track(frame, fretboard, is_track_strings=False, is_visualize=False)
+            if not track_flag:
+                continue
+            # track_flag, fretboard = self.backup_tracker.track(frame, self.detected_frames[begin_frame-1][0], is_visualize=True)
+            self.detected_frames[begin_frame][0].frets = fretboard.frets
+            self.detected_frames[begin_frame][0].oriented_bb = fretboard.oriented_bb
+            # if self.check_outlier(begin_frame+1):
+            #     self.outlier_frames.insert(0, begin_frame+1)
         self.detect_outliers()
     
     def audio_to_midi(self):
@@ -726,6 +769,7 @@ class VideoPlayer(QMainWindow):
             if not success:
                 return
             self.frames.append(frame)
+        cap.release()
 
     def convert_video_to_images(self, cap):
         for i in tqdm(range(self.total_frames)):
@@ -739,7 +783,7 @@ class VideoPlayer(QMainWindow):
         import glob
         
         self.dir = Path(QFileDialog.getExistingDirectory(self, "Select Directory"))
-        # self.dir = Path("D:\\GitHub\\GuitarPlay2Tab\\video\\video4")
+        # self.dir = Path("D:\\GitHub\\GuitarPlay2Tab\\video\\video7")
         print(f"Working on dir: {self.dir}")
 
         filename = glob.glob(str(self.dir / '*.pickle*'))
