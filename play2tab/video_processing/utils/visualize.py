@@ -61,6 +61,57 @@ def draw_fretboard(image: cv2.typing.MatLike, fretboard: Fretboard) -> None:
     for pt1, pt2 in zip(pnts1, pnts2):
         cv2.line(image, pt1, pt2, color=(0, 255, 0), thickness=2)
 
+def draw_hands(image, hands):
+    connections = [
+            [0, 1],
+            [1, 2],
+            [2, 3],
+            [3, 4],
+            [0, 5],
+            [5, 6],
+            [6, 7],
+            [7, 8],
+            [0, 9],
+            [9, 10],
+            [10, 11],
+            [11, 12],
+            [0, 13],
+            [13, 14],
+            [14, 15],
+            [15, 16],
+            [0, 17],
+            [17, 18],
+            [18, 19],
+            [19, 20]
+        ]
+    connection_color = [
+        [255, 0, 0],
+        [255, 0, 0],
+        [255, 0, 0],
+        [255, 0, 0],
+        [255, 179, 0],
+        [255, 179, 0],
+        [255, 179, 0],
+        [255, 179, 0],
+        [145, 255, 0],
+        [145, 255, 0],
+        [145, 255, 0],
+        [145, 255, 0],
+        [0, 255, 195],
+        [0, 255, 195],
+        [0, 255, 195],
+        [0, 255, 195],
+        [0, 72, 255],
+        [0, 72, 255],
+        [0, 72, 255],
+        [0, 72, 255]
+    ]
+    for i in range(hands.shape[0]):
+        for connection, color in zip(connections, connection_color):
+            cv2.line(image, hands[i][connection[0]], hands[i][connection[1]], (color[2], color[1], color[0]), 2)
+        for landmark in hands[i]:
+            cv2.circle(image, (landmark[0], landmark[1]), 5, (255, 0, 0), 3)
+
 def dashed_vertical_line(img, x, y0, y1, color, stroke=5, gap=5):
     stride = stroke + gap
     for y in range(y0, y1):

@@ -1,58 +1,30 @@
-import sys
-import cv2
-from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QSlider, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QFileDialog, QScrollArea
+from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QSlider, QVBoxLayout, QHBoxLayout
+from PyQt6.QtWidgets import QWidget, QPushButton, QFileDialog, QScrollArea, QInputDialog, QLineEdit
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QFont
 from PyQt6.QtCore import Qt, QRect, QRunnable, QObject, QThreadPool
 from PyQt6.QtCore import pyqtSlot as Slot
+
+import gui_utils as gui_utils
+import cv2
+import numpy as np
+
+# Dealing with Python relative import issues
+import sys
+import os
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.dirname(SCRIPT_DIR))
+
+from video_processing.detector import Detector, HandDetector, DetectorStatus
+from video_processing.tracker import TrackerLightGlue, Tracker
+
+import video_processing.utils.utils_math as utils
+import video_processing.utils.visualize as visualize
+from video_processing.fretboard import Fretboard
+
 from pathlib import Path
 from tqdm import tqdm
 import threading
 
-import pickle
-
-import numpy as np
-
-class Worker(QRunnable):
-    def __init__(self, fn, *args, **kwargs):
-        super().__init__()
-        # Store constructor arguments (re-used for processing)
-        self.fn = fn
-        self.args = args
-        self.kwargs = kwargs
-
-    @Slot()  # QtCore.Slot
-    def run(self):
-        self.fn(*self.args, **self.kwargs)
-
-class ColoredSlider(QSlider):
-    def __init__(self, orientation, *args, **kwargs):
-        super().__init__(orientation, *args, **kwargs)
-        self.colored_marks = {}
-
-    def set_colored_marks(self, key, value):
-        """
-        Set the colored marks on the slider.
-        marks: dict where keys are frame numbers (slider positions), and values are QColor objects
-        """
-        self.colored_marks[key] = value
-        self.update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QPainter(self)
-        for position, color in self.colored_marks.items():
-            x = self._position_to_slider_x(position)
-            painter.setPen(QPen(color, 2))
-            painter.drawLine(x, self.rect().top(), x, self.rect().top()+2)
-        painter.end()
-
-    def _position_to_slider_x(self, position):
-        """
-        Convert a slider position to the x-coordinate on the slider track.
-        """
-        range_min, range_max = self.minimum(), self.maximum()
-        slider_pos = (position - range_min) / (range_max - range_min) if range_max > range_min else 0
-        return int(slider_pos * (self.width()))
 
 class ImageWindow(QWidget):
     def __init__(self):
@@ -175,44 +147,82 @@ class TabWindow(QWidget):
                     # raise NotImplementedError
         self.image_label.setPixmap(QPixmap.fromImage(self.image))
 
+class ColoredSlider(QSlider):
+    def __init__(self, orientation, *args, **kwargs):
+        super().__init__(orientation, *args, **kwargs)
+        self.colored_marks = {}
+
+    def set_colored_marks(self, key, value):
+        """
+        Set the colored marks on the slider.
+        marks: dict where keys are frame numbers (slider positions), and values are QColor objects
+        """
+        self.colored_marks[key] = value
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        for position, color in self.colored_marks.items():
+            x = self._position_to_slider_x(position)
+            painter.setPen(QPen(color, 2))
+            painter.drawLine(x, self.rect().top(), x, self.rect().top()+2)
+        painter.end()
+
+    def _position_to_slider_x(self, position):
+        """
+        Convert a slider position to the x-coordinate on the slider track.
+        """
+        range_min, range_max = self.minimum(), self.maximum()
+        slider_pos = (position - range_min) / (range_max - range_min) if range_max > range_min else 0
+        return int(slider_pos * (self.width()))
+
+class Worker(QRunnable):
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__()
+        # Store constructor arguments (re-used for processing)
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+
+    @Slot()  # QtCore.Slot
+    def run(self):
+        self.fn(*self.args, **self.kwargs)
+
 class VideoPlayer(QMainWindow):
     def __init__(self, detector, tracker, backup_tracker, hand_detector):
         super().__init__()
+        
         self.setup_ui()
-        self.is_images_cache = False # only works for short video
-        self.frames = None
 
-        self.original_size, self.scaled_size = None, (720, 1080)
-        self.x_scale, self.y_scale = 1, 1
+        self.is_images_cache = False # only works for short video
+        self.frames_cache = None
+        self.dir = None
+        self.total_frames, self.frame_width, self.frame_height = None, None, None
+        self.video_fps = None
+
+        self.current_frame = None
+        self.max_display_size = (720, 1080)
         self.drawing, self.drawing_enabled = False, False
         self.start_pos, self.end_pos = None, None
         self.final_box = None
         self.fretboard_boundaries = []
         self.frets = []
 
-        self.frame = None
         self.detector = detector
         self.tracker = tracker
         self.backup_tracker = backup_tracker
         self.hand_detector = hand_detector
-
-        self.worker = None
-        self.track_flag = False
+        self.yolo_model = None
 
         self.detected_frames = dict()
         self.outlier_frames = []
         self.model_output, self.midi_data = None, None
-        
-        self.tab = None
 
-        self.threadpool = QThreadPool()
-        
-        self.dir = None
-
-        self.load_data()
-
+        self.bounding_box, self.line_endpnts = None, None
+    
     def setup_ui(self):
-        self.setWindowTitle("PyQt6 Video Player")
+        self.setWindowTitle("GuitarPlay2TAB Annotation GUI")
         self.setGeometry(100, 100, 800, 600)
         self.central_widget, main_layout = QWidget(), QHBoxLayout()
         self.setCentralWidget(self.central_widget)
@@ -221,33 +231,39 @@ class VideoPlayer(QMainWindow):
         sidebar_layout = QVBoxLayout()
         main_layout.addLayout(sidebar_layout)
         for name, func in [ 
-                           ("Detect", self.detect_objects), 
-                           ("Track", self.track_objects),
-                           ("Refine Tracks", self.refine_tracks),
+                           ("Detect", self.detect_objects),
+                           ("Detect YOLO", self.detect_fretboard_with_yolo),
+                           ("Detect hand", self.detect_hand),
+                           ("Track Fretboard", self.track_fretboard),
+                           ("Track Fretboard YOLO", self.track_fretboard_yolo),
+                           ("Track hand", self.track_hand),
                            ("Outlier Detection", self.detect_outliers),
+                           ("Refine Inliers", self.refine_inliers),
                            ('Retrack Outliers', self.retrack_outliers),
-                           ('Inspect Track', self.inspect_track),
-                        #    ("AMT", self.audio_to_midi),
-                        #    ("show_midi", self.show_midi),
-                        #    ("show_tab", self.show_tab),
-                        #    ("midi_to_tab", self.midi_to_tab)
+                           ('Single Inspect Track', self.inspect_track),
+                           ('Batch Inspect Track', self.batch_inspect_track),
+                           ('Batch Delete', self.batch_delete),
+                           ("AMT", self.audio_to_midi),
+                           ("show_midi", self.show_midi),
+                           ("show_tab", self.show_tab),
+                           ("midi_to_tab", self.midi_to_tab)
                            ]:
             button = QPushButton(name)
             button.clicked.connect(func)
             sidebar_layout.addWidget(button)
         sidebar_layout.addStretch()
 
-        video_layout, self.video_label = QVBoxLayout(), QLabel("Load a video to display frames here")
+        video_layout = QVBoxLayout()
+        self.video_label = QLabel("Load a video to display frames here")
         main_layout.addLayout(video_layout)
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         video_layout.addWidget(self.video_label)
 
-        # Frame number display and slider
         slider_layout = QHBoxLayout()
         self.frame_number_label = QLabel(f"Frame: {0:03d}")
         self.slider = ColoredSlider(Qt.Orientation.Horizontal)
         # self.slider.setEnabled(False)
-        self.slider.valueChanged.connect(self.slider_moved)
+        self.slider.valueChanged.connect(self.display_frame)
 
         slider_layout.addWidget(self.frame_number_label)
         slider_layout.addWidget(self.slider)
@@ -267,8 +283,113 @@ class VideoPlayer(QMainWindow):
         self.video_label.mouseMoveEvent = self.update_draw
         self.video_label.mouseReleaseEvent = self.end_draw
 
-        self.statusBar().showMessage("Press '1' for drawing bounding-box, '2' for drawing fretboard boundaries.")
+        self.status = self.statusBar()
+        self.status.showMessage("Press '1' to draw bounding-box, '2' to draw fretboard boundaries.")
+
+    def save_data(self):
+        import pickle
+        
+        if self.dir is None:
+            return
+        if self.midi_data is not None:
+            self.midi_data.write(str(self.dir / 'audio.mid'))
+        filename = str(self.dir / 'vision.pickle')
+        with open(filename, "wb") as f:
+            pickle.dump([self.detected_frames, self.midi_data], f)
+        
+        gui_utils.format_and_store_json(self.detected_frames, self.total_frames, 
+                                        self.frame_width, self.frame_height, 
+                                        self.dir)
     
+    def load_data(self):
+        import glob
+        import pickle
+        
+        dir = QFileDialog.getExistingDirectory(self, "Select Directory")
+        if dir == '':
+            return
+        self.dir = Path(dir)
+        # self.dir = Path("D:\\GitHub\\GuitarPlay2Tab\\video\\video5")
+        print(f"Working on dir: {self.dir}")
+
+        filename = glob.glob(str(self.dir / '*.pickle*'))
+        if filename:
+            with open(filename[0], 'rb') as f:
+                self.detected_frames, self.midi_data = pickle.load(f)
+            self.slider.colored_marks = {k: QColor("green") for k in self.detected_frames}
+        
+        filename = glob.glob(str(self.dir / '*.mp4'))
+        if not filename:
+            print(f"Video {filename} not found.")
+            return
+        cap = cv2.VideoCapture(filename[0])
+        self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.video_fps = cap.get(cv2.CAP_PROP_FPS)
+        if not os.path.isdir(str(self.dir / 'images')):
+            os.mkdir(str(self.dir / 'images'))
+            if not cap.isOpened():
+                self.video_label.setText("Failed to open video file.")
+                return
+            self.convert_video_to_images(cap)
+        
+        if self.is_images_cache:
+            cap = cv2.VideoCapture(filename[0])
+            self.cache_video(cap)
+        self.slider.setMaximum(self.total_frames - 1)
+        self.slider.setEnabled(True)
+        self.slider.setValue(0)
+        self.display_frame(0)
+    
+    def cache_video(self, cap):
+        self.frames_cache = []
+        for i in tqdm(range(self.total_frames)):
+            success, frame = cap.read()
+            if not success:
+                return
+            self.frames_cache.append(frame)
+        cap.release()
+
+    def convert_video_to_images(self, cap):
+        for i in tqdm(range(self.total_frames)):
+            success, frame = cap.read()
+            if not success:
+                return
+            cv2.imwrite(str(self.dir / 'images' / f'{i}.jpg'), frame)
+        cap.release()
+    
+    def read_frame(self, frame_number):
+        if self.is_images_cache:
+            frame = self.frames_cache[frame_number]
+        else:
+            frame = cv2.imread(str(self.dir / 'images' / f'{frame_number}.jpg'))
+        return frame
+
+    def display_frame(self, frame_number):
+        if self.dir is None:
+            return
+        self.current_frame = self.read_frame(frame_number)
+
+        display_frame = self.current_frame.copy()
+        if len(self.detected_frames) > 0 and frame_number in self.detected_frames:
+            fretboard = self.detected_frames[frame_number][0]
+            hands = self.detected_frames[frame_number][1]
+            if fretboard is not None:
+                visualize.draw_fretboard(display_frame, fretboard)
+            if hands is not None:
+                visualize.draw_hands(display_frame, hands)
+        
+        frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+        self.resized_frame, self.display_factor = gui_utils.resize_with_aspect(frame_rgb, self.max_display_size)
+
+        q_image = QImage(self.resized_frame.data, self.resized_frame.shape[1], 
+                        self.resized_frame.shape[0], self.resized_frame.strides[0], 
+                        QImage.Format.Format_RGB888)
+        self.video_label.setPixmap(QPixmap.fromImage(q_image))
+
+        self.frame_number_label.setText(f"Frame: {frame_number:03d}")
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_1:
             self.drawing_enabled = True
@@ -280,16 +401,22 @@ class VideoPlayer(QMainWindow):
             self.drawing_mode = 'lines'
             self.fretboard_boundaries = []
         
-        if event.key() == Qt.Key.Key_Q:
-            if self.worker is not None:
-                self.track_flag = False
-            current_frame = self.slider.value()
-            self.slider.setValue(current_frame-1)
+        if event.key() == Qt.Key.Key_3:
+            self.drawing_enabled = True
+            self.drawing_mode = 'boundary_redraw'
         
         if event.key() == Qt.Key.Key_F:
             self.drawing_enabled = True
             self.drawing_mode = 'frets'
             self.frets = []
+
+        if event.key() == Qt.Key.Key_Q:
+            current_frame = self.slider.value()
+            self.slider.setValue(current_frame-1)
+        
+        if event.key() == Qt.Key.Key_E:
+            current_frame = self.slider.value()
+            self.slider.setValue(current_frame+1)
 
         if event.key() == Qt.Key.Key_A:
             if len(self.outlier_frames) == 0:
@@ -309,85 +436,70 @@ class VideoPlayer(QMainWindow):
                 return
             self.slider.setValue(greater_outlier_frames[0])
         
-        if event.key() == Qt.Key.Key_E:
-            current_frame = self.slider.value()
-            self.slider.setValue(current_frame+1)
-        
         if event.key() == Qt.Key.Key_B:
             current_frame = self.slider.value()
             self.detected_frames.pop(current_frame, None)
-
-        # finalize box
+            self.display_frame(current_frame)
+        
+        if event.key() == Qt.Key.Key_N:
+            current_frame = self.slider.value()
+            if current_frame not in self.detected_frames:
+                return
+            self.detected_frames[current_frame] = (self.detected_frames[current_frame][0], None)
+            self.display_frame(current_frame)
+        
         if event.key() == Qt.Key.Key_Return:
             if self.drawing_mode == 'bb':
                 (start, end) = self.bounding_box
-                x, y, w, h = int(min(start[0], end[0])), int(min(start[1], end[1])), abs(int(end[0] - start[0])), abs(int(end[1] - start[1]))
-                original_box = (int(x * self.x_scale), int(y * self.y_scale), int(w * self.x_scale), int(h * self.y_scale))
+                x, y = min(start[0], end[0]), min(start[1], end[1])
+                w, h = abs(end[0] - start[0]), abs(end[1] - start[1])
+                original_box = (int(x / self.display_factor), int(y / self.display_factor), 
+                                int(w / self.display_factor), int(h / self.display_factor))
                 self.final_box = original_box
                 self.drawing_enabled = False
             
             if self.drawing_mode == 'lines':
                 if len(self.fretboard_boundaries) == 0:
                     (start, end) = self.line_endpnts
-                    self.fretboard_boundaries.append([int(start[0] * self.x_scale), int(start[1] * self.y_scale), \
-                                                      int(end[0] * self.x_scale), int(end[1] * self.y_scale)])
+                    self.fretboard_boundaries.append([start[0] / self.display_factor, start[1] / self.display_factor, \
+                                                      end[0] / self.display_factor, end[1] / self.display_factor])
                 elif len(self.fretboard_boundaries) == 1:
                     (start, end) = self.line_endpnts
-                    self.fretboard_boundaries.append([int(start[0] * self.x_scale), int(start[1] * self.y_scale), \
-                                                      int(end[0] * self.x_scale), int(end[1] * self.y_scale)])
+                    self.fretboard_boundaries.append([start[0] / self.display_factor, start[1] / self.display_factor, \
+                                                      end[0] / self.display_factor, end[1] / self.display_factor])
                     self.drawing_enabled = False
-            
+
             if self.drawing_mode == 'frets':
                 (start, end) = self.line_endpnts
-                self.frets.append([int(start[0] * self.x_scale), int(start[1] * self.y_scale), \
-                                   int(end[0] * self.x_scale), int(end[1] * self.y_scale)])
+                self.frets.append([start[0] / self.display_factor, start[1] / self.display_factor, \
+                                   end[0] / self.display_factor, end[1] / self.display_factor])
 
-    def read_frame(self, frame_number):
-        if self.is_images_cache:
-            frame = self.frames[frame_number]
-        else:
-            frame = cv2.imread(str(self.dir / 'images' / f'{frame_number}.jpg'))
-        return frame
-
-    def display_frame(self, frame_number):
-        frame = self.read_frame(frame_number)
-        
-        self.frame = frame
-        self.resized_frame = self.resize_with_aspect(frame, self.scaled_size)
-
-        self.original_size = frame.shape[1], frame.shape[0]
-        self.x_scale, self.y_scale = self.original_size[0] / self.resized_frame.shape[1], self.original_size[1] / self.resized_frame.shape[0]
-
-        if len(self.detected_frames) == 0 or frame_number not in self.detected_frames:
-            frame_rgb = cv2.cvtColor(self.resized_frame, cv2.COLOR_BGR2RGB)
-            q_image = QImage(frame_rgb.data, frame_rgb.shape[1], frame_rgb.shape[0], frame_rgb.strides[0], QImage.Format.Format_RGB888)
-            self.video_label.setPixmap(QPixmap.fromImage(q_image))
-        else:
-            self.gui_draw_fretboard(self.frame, self.detected_frames[frame_number][0], self.detected_frames[frame_number][1])
-
-        # Update frame number label
-        self.frame_number_label.setText(f"Frame: {frame_number:03d}")
-
-    def resize_with_aspect(self, frame, max_size):
-        h, w = frame.shape[:2]
-        scale = min(max_size[1] / w, max_size[0] / h)
-        return cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-
-    def slider_moved(self, position):
-        self.display_frame(position)
+            if self.drawing_mode == 'boundary_redraw':
+                (start, end) = self.line_endpnts
+                lineP_redraw = np.array([start[0] / self.display_factor, start[1] / self.display_factor, \
+                                        end[0] / self.display_factor, end[1] / self.display_factor])
+                current_frame = self.slider.value()
+                utils.linesP_to_houghlines(lineP_redraw.reshape((-1, 1, 4)))
+                if utils.lineP_line_dist(lineP_redraw, self.detected_frames[current_frame][0].strings[0]) < \
+                utils.lineP_line_dist(lineP_redraw, self.detected_frames[current_frame][0].strings[-1]):
+                    self.detected_frames[current_frame][0].strings[0] = utils.linesP_to_houghlines(lineP_redraw.reshape((-1, 1, 4)))[0]
+                else:
+                    self.detected_frames[current_frame][0].strings[-1] = utils.linesP_to_houghlines(lineP_redraw.reshape((-1, 1, 4)))[0]
+                
+                self.display_frame(current_frame)
 
     def start_draw(self, event):
         if self.drawing_enabled:
-            self.drawing, self.start_pos = True, (event.position().x(), event.position().y())
+            self.drawing = True
+            self.start_pos = (event.position().x(), event.position().y())
         
         if event.button() == Qt.MouseButton.RightButton:
             current_frame = self.slider.value()
             if current_frame not in self.detected_frames:
                 return
-            (event.position().x(), event.position().y())
             resize_mat = np.eye(3)
-            resize_mat[0, 0] = 1/self.x_scale
-            resize_mat[1, 1] = 1/self.y_scale
+            resize_mat[0, 0] = self.display_factor
+            resize_mat[1, 1] = self.display_factor
             resized_frets = utils.transform_houghlines(self.detected_frames[current_frame][0].frets, np.linalg.inv(resize_mat))
             dist_to_frets = np.abs(resized_frets[:, 0] - event.position().x()*np.cos(resized_frets[:, 1]) - event.position().y()*np.sin(resized_frets[:, 1]))
             fret_ind = np.argmin(dist_to_frets)
@@ -405,7 +517,7 @@ class VideoPlayer(QMainWindow):
             if self.drawing_mode == 'bb':
                 self.bounding_box = (self.start_pos, self.end_pos)
                 self.draw_bounding_box()
-            elif self.drawing_mode == 'lines' or self.drawing_mode == 'frets':
+            elif self.drawing_mode == 'lines' or self.drawing_mode == 'frets' or self.drawing_mode == 'boundary_redraw':
                 self.line_endpnts = (self.start_pos, self.end_pos)
                 self.draw_line()
 
@@ -417,7 +529,7 @@ class VideoPlayer(QMainWindow):
             if self.drawing_mode == 'bb':
                 self.bounding_box = (self.start_pos, self.end_pos)
                 self.draw_bounding_box()
-            elif self.drawing_mode == 'lines' or self.drawing_mode == 'frets':
+            elif self.drawing_mode == 'lines' or self.drawing_mode == 'frets' or self.drawing_mode == 'boundary_redraw':
                 self.line_endpnts = (self.start_pos, self.end_pos)
                 self.draw_line()
 
@@ -425,7 +537,7 @@ class VideoPlayer(QMainWindow):
         if self.resized_frame is None:
             return
 
-        frame_copy = cv2.cvtColor(self.resized_frame.copy(), cv2.COLOR_BGR2RGB)
+        frame_copy = self.resized_frame.copy()
         q_image = QImage(frame_copy.data, frame_copy.shape[1], frame_copy.shape[0], frame_copy.strides[0], QImage.Format.Format_RGB888)
         pixmap = QPixmap.fromImage(q_image)
         
@@ -433,17 +545,18 @@ class VideoPlayer(QMainWindow):
         painter.setPen(QPen(Qt.GlobalColor.green, 2))
         
         (start, end) = self.bounding_box
-        x, y, w, h = int(min(start[0], end[0])), int(min(start[1], end[1])), abs(int(end[0] - start[0])), abs(int(end[1] - start[1]))
+        x, y = int(min(start[0], end[0])), int(min(start[1], end[1]))
+        w, h = int(abs(end[0] - start[0])), int(abs(end[1] - start[1]))
         painter.drawRect(QRect(x, y, w, h))
         
         painter.end()
         self.video_label.setPixmap(pixmap)
-    
+
     def draw_line(self):
         if self.resized_frame is None:
             return
         
-        frame_copy = cv2.cvtColor(self.resized_frame.copy(), cv2.COLOR_BGR2RGB)
+        frame_copy = self.resized_frame.copy()
         q_image = QImage(frame_copy.data, frame_copy.shape[1], frame_copy.shape[0], frame_copy.strides[0], QImage.Format.Format_RGB888)
         pixmap = QPixmap.fromImage(q_image)
         
@@ -452,79 +565,104 @@ class VideoPlayer(QMainWindow):
         painter.drawLine(int(self.line_endpnts[0][0]), int(self.line_endpnts[0][1]), int(self.line_endpnts[1][0]), int(self.line_endpnts[1][1]))
         if len(self.fretboard_boundaries) > 0:
             for line in self.fretboard_boundaries:
-                painter.drawLine(int(line[0]/self.x_scale), int(line[1]/self.y_scale), 
-                                int(line[2]/self.x_scale), int(line[3]/self.y_scale))
+                painter.drawLine(int(line[0] * self.display_factor), int(line[1] * self.display_factor), 
+                                int(line[2] * self.display_factor), int(line[3] * self.display_factor))
         if len(self.frets) > 0:
             for line in self.frets:
-                painter.drawLine(int(line[0]/self.x_scale), int(line[1]/self.y_scale), 
-                                int(line[2]/self.x_scale), int(line[3]/self.y_scale))
+                painter.drawLine(int(line[0] * self.display_factor), int(line[1] * self.display_factor), 
+                                int(line[2] * self.display_factor), int(line[3] * self.display_factor))
         painter.end()
         self.video_label.setPixmap(pixmap)
     
-    def gui_draw_fretboard(self, frame, fretboard, hands=None):
-        frame_copy = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        draw_fretboard(frame_copy, fretboard)
-        if hands is not None:
-            for i in range(hands.shape[0]):
-                for landmark in hands[i]:
-                    cv2.circle(frame_copy, (landmark[0], landmark[1]), 5, (0, 0, 255), 3)
-        frame_copy = self.resize_with_aspect(frame_copy, self.scaled_size)
-
-        q_image = QImage(frame_copy.data, frame_copy.shape[1], frame_copy.shape[0], frame_copy.strides[0], QImage.Format.Format_RGB888)
-        self.video_label.setPixmap(QPixmap.fromImage(q_image))
-
+    # -------------------------------------------------------------------------
+    # Implementation for the buttons
     def detect_objects(self):
-        if self.frame is not None:
-            if self.final_box:
-                status, fretboard = self.detector.detect(self.frame, bb=self.final_box, is_visualize=False)
-            elif len(self.frets) > 0:
-                if len(self.fretboard_boundaries) == 0:
-                    current_frame = self.slider.value()
-                    if current_frame in self.detected_frames:
-                        frets = linesP_to_houghlines(np.expand_dims(np.array(self.frets), axis=1))
-                        concat_frets = np.vstack((frets, self.detected_frames[current_frame][0].frets))
-                        concat_frets = concat_frets[np.argsort(concat_frets[:, 0])[::-1]]
-                        oriented_bb = oriented_bb_from_frets_strings(concat_frets, self.detected_frames[current_frame][0].strings)
-                        oriented_bb = (oriented_bb[0], (oriented_bb[1][0] + 50, oriented_bb[1][1] + 100), oriented_bb[2])
-                        fretboard = Fretboard(concat_frets, self.detected_frames[current_frame][0].strings, oriented_bb)
-                        status = DetectorStatus.success
-                    else:
-                        return
-                else:
-                    frets = linesP_to_houghlines(np.expand_dims(np.array(self.frets), axis=1))
-                    strings = linesP_to_houghlines(np.expand_dims(np.array(self.fretboard_boundaries), axis=1))
-                    oriented_bb = oriented_bb_from_frets_strings(frets, strings)
-                    oriented_bb = (oriented_bb[0], (oriented_bb[1][0] + 50, oriented_bb[1][1] + 100), oriented_bb[2])
-                    fretboard = Fretboard(frets, strings, oriented_bb)
-                    status = DetectorStatus.success
-            elif len(self.fretboard_boundaries) == 2:
-                print(f"Detecting with user-defined fretboard_boundaries: {self.fretboard_boundaries}")
-                status, fretboard = self.detector.detect(self.frame, fretboard_boundaries=self.fretboard_boundaries, is_visualize=False)
-            else:
-                status, fretboard = self.detector.detect(self.frame, is_visualize=False)
-            print(status)
-            if fretboard is not None:
-                hand_oriented_bb = (fretboard.oriented_bb[0], 
-                                    (fretboard.oriented_bb[1][0]+200, fretboard.oriented_bb[1][1]),
-                                    fretboard.oriented_bb[2])
-                cropped_frame, crop_transform = crop_from_oriented_bb(self.frame, hand_oriented_bb)
-
-                hands = self.hand_detector.detect(cropped_frame, fretboard=fretboard, crop_transform=crop_transform)
+        if self.current_frame is None:
+            return
+        if self.final_box:
+            status, fretboard = self.detector.detect(self.current_frame, bb=self.final_box, is_visualize=False)
+        elif len(self.frets) > 0:
+            if len(self.fretboard_boundaries) == 0:
                 current_frame = self.slider.value()
-                if hands is not None:
-                    self.gui_draw_fretboard(self.frame, fretboard, hands)
-                    self.detected_frames[current_frame] = (fretboard, hands)
+                if current_frame in self.detected_frames:
+                    frets = utils.linesP_to_houghlines(np.expand_dims(np.array(self.frets), axis=1))
+                    concat_frets = np.vstack((frets, self.detected_frames[current_frame][0].frets))
+                    concat_frets = concat_frets[np.argsort(concat_frets[:, 0])[::-1]]
+                    oriented_bb = utils.oriented_bb_from_frets_strings(concat_frets, self.detected_frames[current_frame][0].strings)
+                    oriented_bb = (oriented_bb[0], (oriented_bb[1][0] + 50, oriented_bb[1][1] + 100), oriented_bb[2])
+                    fretboard = Fretboard(concat_frets, self.detected_frames[current_frame][0].strings, oriented_bb)
+                    status = DetectorStatus.success
                 else:
-                    self.gui_draw_fretboard(self.frame, fretboard)
-                    self.detected_frames[current_frame] = (fretboard, None)
-                self.slider.set_colored_marks(current_frame, QColor("green"))
+                    return
+            else:
+                frets = utils.linesP_to_houghlines(np.expand_dims(np.array(self.frets), axis=1))
+                strings = utils.linesP_to_houghlines(np.expand_dims(np.array(self.fretboard_boundaries), axis=1))
+                oriented_bb = utils.oriented_bb_from_frets_strings(frets, strings)
+                oriented_bb = (oriented_bb[0], (oriented_bb[1][0] + 50, oriented_bb[1][1] + 100), oriented_bb[2])
+                fretboard = Fretboard(frets, strings, oriented_bb)
+                status = DetectorStatus.success
+        elif len(self.fretboard_boundaries) == 2:
+            print(f"Detecting with user-defined fretboard_boundaries: {self.fretboard_boundaries}")
+            status, fretboard = self.detector.detect(self.current_frame, fretboard_boundaries=self.fretboard_boundaries, is_visualize=False)
         else:
-            pass
+            status, fretboard = self.detector.detect(self.current_frame, is_visualize=False)
+        print(status)
+        if fretboard is not None:
+            hands = self.hand_detector.detect(self.current_frame, fretboard=fretboard)
+            current_frame = self.slider.value()
+            if hands is not None:
+                self.detected_frames[current_frame] = (fretboard, hands)
+            else:
+                self.detected_frames[current_frame] = (fretboard, None)
+            self.slider.set_colored_marks(current_frame, QColor("green"))
+            self.display_frame(current_frame)
 
-    def track_objects_(self):
-        begin_frame = min(list(self.detected_frames.keys()))
+    def detect_hand(self):
+        if self.current_frame is None:
+            return
+        if self.final_box is None:
+            hands = self.hand_detector.detect(self.current_frame)
+        else:
+            hands = self.hand_detector.detect(self.current_frame, bb=self.final_box)
+        current_frame = self.slider.value()
+        if current_frame in self.detected_frames:
+            tmp = self.detected_frames[current_frame]
+            if hands is not None:
+                self.detected_frames[current_frame] = (tmp[0], hands)
+        else:
+            if hands is not None:
+                self.detected_frames[current_frame] = (None, hands)
+        self.display_frame(current_frame)
+
+    def detect_fretboard_with_yolo(self):
+        if self.current_frame is None:
+            return
+        if self.yolo_model is None:
+            from ultralytics import YOLO
+            model_path = "D:\\GitHub\\GuitarPlay2Tab\\GuitarPlay2Tab\\runs\\pose\\train\\weights\\last.pt"
+            self.yolo_model = YOLO(model_path)
+        results = self.yolo_model.predict(source=self.current_frame, show=False, save=False)
+        
+        kps = results[0].keypoints.to('cpu').data.numpy()[0]
+        fretboard = utils.fretboard_from_yolo(kps)
+        current_frame = self.slider.value()
+        if current_frame in self.detected_frames:
+            hands = self.detected_frames[current_frame][1]
+        else:
+            hands = None
+        self.detected_frames[current_frame] = (fretboard, hands)
+        self.display_frame(current_frame)
+
+    def track_fretboard_(self):
+        begin_frame = self.slider.value()
         frame = self.read_frame(begin_frame)
         self.tracker.create_template(frame, self.detected_frames[begin_frame])
+
+        text, okPressed = QInputDialog.getText(self, "Get Text", "Enter end frame:")
+        if okPressed:
+            end_frame = int(text)
+        else:
+            end_frame = self.total_frames
         
         # begin_frame = max(list(self.detected_frames.keys()))+1
         begin_frame = begin_frame + 1
@@ -535,9 +673,10 @@ class VideoPlayer(QMainWindow):
             # import pstats
             # with Profile() as profile:
                 # while self.track_flag:
-            for i in tqdm(range(begin_frame, self.total_frames)):
+            for i in tqdm(range(begin_frame, end_frame)):
                 frame = self.read_frame(i)
 
+                # self.track_flag, fretboard = self.backup_tracker.track(frame, self.detected_frames[i-1][0], is_track_strings=True, is_visualize=False)
                 self.track_flag, fretboard = self.tracker.track(frame, self.detected_frames[i-1][0], is_visualize=False)
                 if self.track_flag:
                     # hand_oriented_bb = (fretboard.oriented_bb[0], 
@@ -547,11 +686,11 @@ class VideoPlayer(QMainWindow):
                     
                     # prev_hands = self.detected_frames[begin_frame-1][1]
                     # hands = self.hand_detector.detect(cropped_frame, fretboard=fretboard, crop_transform=crop_transform, prev_hands=prev_hands)
-                    hands = None
-                    if hands is not None:
-                        result = (fretboard, hands)
+                    if i in self.detected_frames:
+                        hands = self.detected_frames[i][1]
                     else:
-                        result = (fretboard, None)
+                        hands = None
+                    result = (fretboard, hands)
                 else:
                     break
                 self.detected_frames[i] = result
@@ -562,16 +701,85 @@ class VideoPlayer(QMainWindow):
             # results.dump_stats('results.prof')
         except Exception as e:
             print(e)
+
+    def track_fretboard(self):
+        if len(self.detected_frames) == 0:
+            return
+        # self.worker = Worker(self.track_objects_) # Any other args, kwargs are passed to the run function
+        # self.threadpool.start(self.worker)
+        self.track_fretboard_()
     
-    def refine_tracks(self):
+    def track_fretboard_yolo_(self):
+        if self.yolo_model is None:
+            from ultralytics import YOLO
+            model_path = "D:\\GitHub\\GuitarPlay2Tab\\GuitarPlay2Tab\\runs\\pose\\train\\weights\\last.pt"
+            self.yolo_model = YOLO(model_path)
+        self.track_flag = True
+        try:
+            begin_frame = self.slider.value() + 1
+            text, okPressed = QInputDialog.getText(self, "Get Text", "Enter end frame:")
+            if okPressed:
+                end_frame = int(text)
+            else:
+                end_frame = self.total_frames
+            for i in tqdm(range(begin_frame, end_frame)):
+                frame = self.read_frame(i)
+                results = self.yolo_model.predict(source=frame, show=False, save=False, verbose=False)
+                kps = results[0].keypoints.to('cpu').data.numpy()[0]
+                fretboard = utils.fretboard_from_yolo(kps)
+                self.detected_frames[i] = (fretboard, None)
+        except Exception as e:
+            print(e)
+
+    def track_fretboard_yolo(self):
+        self.track_fretboard_yolo_()
+    
+    def track_hand_(self):
+        try:
+            begin_frame = self.slider.value() + 1
+            text, okPressed = QInputDialog.getText(self, "Get Text", "Enter end frame:")
+            if okPressed:
+                end_frame = int(text)
+            else:
+                end_frame = self.total_frames
+            for i in tqdm(range(begin_frame, end_frame)):
+                frame = self.read_frame(i)
+                if self.final_box is not None:
+                    hands = self.hand_detector.detect(frame, bb=self.final_box)
+                else:
+                    if i-1 not in self.detected_frames:
+                        hands = self.hand_detector.detect(frame)
+                    else:
+                        prev_hands = self.detected_frames[i-1][1]
+                        if prev_hands is None:
+                            if i not in self.detected_frames:
+                                hands = self.hand_detector.detect(frame)
+                            else:
+                                now_fretboard = self.detected_frames[i][0]
+                                hands = self.hand_detector.detect(frame, fretboard=now_fretboard)
+                        else:
+                            hands = self.hand_detector.detect(frame, prev_hands=prev_hands)
+                if hands is None:
+                    break
+                if i not in self.detected_frames:
+                    self.detected_frames[i] = (None, hands)
+                else:
+                    self.detected_frames[i] = (self.detected_frames[i][0], hands)
+        except Exception as e:
+            print(e)
+
+    def track_hand(self):
+        self.track_hand_()
+    
+    def refine_inliers(self):
         begin_frame = min(list(self.detected_frames.keys())) + 1
         try:
             for i in tqdm(range(begin_frame, self.total_frames)):
                 if i in self.outlier_frames or i-1 in self.outlier_frames:
                     continue
-                frame = self.read_frame(i)
                 if i-1 not in self.detected_frames or i not in self.detected_frames:
                     continue
+                frame = self.read_frame(i)
 
                 fretboard = self.detected_frames[i][0].copy()
                 fretboard.oriented_bb = self.detected_frames[i-1][0].oriented_bb
@@ -582,43 +790,78 @@ class VideoPlayer(QMainWindow):
         except Exception as e:
             print(e)
 
-    def inspect_track(self):
-        begin_frame = min(list(self.detected_frames.keys()))
-        frame = self.read_frame(begin_frame)
-        self.tracker.create_template(frame, self.detected_frames[begin_frame])
+    def batch_inspect_track(self):
+        try:
+            begin_frame = self.slider.value()
+            frame = self.read_frame(begin_frame)
+            self.tracker.create_template(frame, self.detected_frames[begin_frame])
 
-        begin_frame = self.slider.value()
-        frame = self.read_frame(begin_frame)
-        if begin_frame-1 not in self.detected_frames:
-            return
-        fretboard = self.detected_frames[begin_frame][0].copy()
-        fretboard.oriented_bb = self.detected_frames[begin_frame-1][0].oriented_bb
-        fretboard.frets = self.detected_frames[begin_frame-1][0].frets
-        track_flag, fretboard = self.backup_tracker.track(frame, fretboard, is_track_strings=False, is_visualize=True)
-
-        if track_flag:
-            # hand_oriented_bb = (fretboard.oriented_bb[0], 
-            #                     (fretboard.oriented_bb[1][0]+200, fretboard.oriented_bb[1][1]),
-            #                     fretboard.oriented_bb[2])
-            # cropped_frame, crop_transform = crop_from_oriented_bb(frame, hand_oriented_bb)
-            
-            # prev_hands = self.detected_frames[begin_frame-1][1]
-            # hands = self.hand_detector.detect(cropped_frame, fretboard=fretboard, crop_transform=crop_transform, prev_hands=prev_hands)
-            hands = None
-            if hands is not None:
-                result = (fretboard, hands)
+            text, okPressed = QInputDialog.getText(self, "Get Text", "Enter end frame:")
+            if okPressed:
+                end_frame = int(text)
             else:
-                result = (fretboard, None)
-            self.detected_frames[begin_frame] = result
-            self.display_frame(begin_frame)
-    
-    def track_objects(self):
-        if len(self.detected_frames) == 0:
-            return
-        # self.worker = Worker(self.track_objects_) # Any other args, kwargs are passed to the run function
-        # self.threadpool.start(self.worker)
-        self.track_objects_()
-    
+                end_frame = self.total_frames
+            begin_frame = self.slider.value()+1
+            for i in tqdm(range(begin_frame, end_frame)):
+                begin_frame = i
+                frame = self.read_frame(begin_frame)
+                if begin_frame-1 not in self.detected_frames:
+                    return
+                fretboard = self.detected_frames[begin_frame][0].copy()
+                fretboard.oriented_bb = self.detected_frames[begin_frame-1][0].oriented_bb
+                fretboard.frets = self.detected_frames[begin_frame-1][0].frets
+                track_flag, fretboard = self.backup_tracker.track(frame, fretboard, is_track_strings=False, is_visualize=True)
+
+                if track_flag:
+                    # hand_oriented_bb = (fretboard.oriented_bb[0], 
+                    #                     (fretboard.oriented_bb[1][0]+200, fretboard.oriented_bb[1][1]),
+                    #                     fretboard.oriented_bb[2])
+                    # cropped_frame, crop_transform = crop_from_oriented_bb(frame, hand_oriented_bb)
+                    
+                    # prev_hands = self.detected_frames[begin_frame-1][1]
+                    # hands = self.hand_detector.detect(cropped_frame, fretboard=fretboard, crop_transform=crop_transform, prev_hands=prev_hands)
+                    hands = None
+                    if hands is not None:
+                        result = (fretboard, hands)
+                    else:
+                        result = (fretboard, None)
+                    self.detected_frames[begin_frame] = result
+                    self.display_frame(begin_frame)
+        except Exception as e:
+            print(e)
+
+    def inspect_track(self):
+        try:
+            begin_frame = min(list(self.detected_frames.keys()))
+            frame = self.read_frame(begin_frame)
+            self.tracker.create_template(frame, self.detected_frames[begin_frame])
+            begin_frame = self.slider.value()
+            frame = self.read_frame(begin_frame)
+            if begin_frame-1 not in self.detected_frames:
+                return
+            fretboard = self.detected_frames[begin_frame][0].copy()
+            fretboard.oriented_bb = self.detected_frames[begin_frame-1][0].oriented_bb
+            fretboard.frets = self.detected_frames[begin_frame-1][0].frets
+            track_flag, fretboard = self.backup_tracker.track(frame, fretboard, is_track_strings=False, is_visualize=True)
+
+            if track_flag:
+                # hand_oriented_bb = (fretboard.oriented_bb[0], 
+                #                     (fretboard.oriented_bb[1][0]+200, fretboard.oriented_bb[1][1]),
+                #                     fretboard.oriented_bb[2])
+                # cropped_frame, crop_transform = crop_from_oriented_bb(frame, hand_oriented_bb)
+                
+                # prev_hands = self.detected_frames[begin_frame-1][1]
+                # hands = self.hand_detector.detect(cropped_frame, fretboard=fretboard, crop_transform=crop_transform, prev_hands=prev_hands)
+                if begin_frame in self.detected_frames:
+                    hands = self.detected_frames[begin_frame][1]
+                else:
+                    hands = None
+                result = (fretboard, hands)
+                self.detected_frames[begin_frame] = result
+                self.display_frame(begin_frame)
+        except Exception as e:
+            print(e)
+
     def check_outlier(self, key):
         if key-1 not in self.detected_frames:
             return False
@@ -671,13 +914,30 @@ class VideoPlayer(QMainWindow):
             #     self.outlier_frames.insert(0, begin_frame+1)
         self.detect_outliers()
     
+    def batch_delete(self):
+        text, okPressed = QInputDialog.getText(self, "Get Text", "Enter range:")
+        if okPressed:
+            twonumbers = text.split('-')
+            if twonumbers[0] == '':
+                start = 0
+            else:
+                start = int(twonumbers[0])
+            if twonumbers[1] == '':
+                end = self.total_frames
+            else:
+                end = int(twonumbers[1])
+            for i in range(start, end):
+                self.detected_frames.pop(i, None)
+
+
     def audio_to_midi(self):
         from basic_pitch_torch.inference import predict
 
         model_path = str(Path('.').absolute() / 'basic_pitch_torch' / 'assets' / 'basic_pitch_pytorch_icassp_2022.pth')
 
         # note_events: A list of note event tuples (start_time_s, end_time_s, pitch_midi, amplitude)
-        self.model_output, self.midi_data, _ = predict(str(self.dir / '*.mp4*'), model_path=model_path)
+        import glob
+        self.model_output, self.midi_data, _ = predict(glob.glob(str(self.dir / '*.mp4'))[0], model_path=model_path)
         print('Finished Processing')
     
     def show_midi(self):
@@ -696,142 +956,23 @@ class VideoPlayer(QMainWindow):
     def midi_to_tab(self):
         assert('broken implementation')
         self.tab = TabWindow()
-        total_sec = self.total_frames / self.cap.get(cv2.CAP_PROP_FPS)
+        total_sec = self.total_frames / self.video_fps
         length_per_sec = 100
         self.tab.create_canvas(total_sec, length_per_sec)
         self.show_tab()
-        self.tab.midi_to_tab(self.midi_data, self.detected_frames, self.cap.get(cv2.CAP_PROP_FPS))
+        self.tab.midi_to_tab(self.midi_data, self.detected_frames, self.video_fps)
     
-    def format_and_store_json(self):
-        import json
-        import gzip
-        from video_processing.utils.utils_math import line_line_intersection_batch
-
-        keys = list(self.detected_frames.keys())
-        data = {
-            "info": {
-                "number_of_frames": self.total_frames,
-                "width": self.frame_width,
-                "height": self.frame_height,
-                "number_of_frets": self.detected_frames[keys[0]][0].frets.shape[0],
-                "number_of_strings": self.detected_frames[keys[0]][0].strings.shape[0]
-            },
-            "annotations_fretboard": []
-        }
-        for key in keys:
-            # make sure strings[0] is at the top
-            if self.detected_frames[key][0].strings[0][0] < self.detected_frames[key][0].strings[1][0]:
-                strings = self.detected_frames[key][0].strings
-            else:
-                strings = self.detected_frames[key][0].strings[[1, 0]]
-            
-            # make sure frets[0] is at the right-most
-            if self.detected_frames[key][0].frets[0][0] < self.detected_frames[key][0].frets[-1][0]:
-                frets = self.detected_frames[key][0].frets[::-1]
-            else:
-                frets = self.detected_frames[key][0].frets
-            
-            keypoints_top = line_line_intersection_batch(frets, strings[0])
-            keypoints_bottom = line_line_intersection_batch(frets, strings[1])
-
-            keypoints = np.zeros((2*frets.shape[0], 2))
-            keypoints[0::2, :] = keypoints_top
-            keypoints[1::2, :] = keypoints_bottom
-
-            annotation = {
-                "frame": key,
-                "keypoints": keypoints.astype(int).tolist(),
-                "oriented_bb": self.detected_frames[key][0].oriented_bb
-            }
-            data["annotations_fretboard"].append(annotation)
-        
-        output_path = str(self.dir / "annotations.json.gz")
-        with gzip.open(output_path, 'wt', encoding='UTF-8') as zipfile:
-           json.dump(data, zipfile)
-        
-        print(f"COCO JSON file with annotations saved to {output_path}")
-
-    def save_data(self):
-        if self.dir is None:
-            return
-        if self.midi_data is not None:
-            self.midi_data.write(str(self.dir / 'audio.mid'))
-        filename = str(self.dir / 'vision.pickle')
-        with open(filename, "wb") as f:
-            pickle.dump([self.detected_frames, self.model_output], f)
-        
-        self.format_and_store_json()
-
-    def cache_video(self, cap):
-        self.frames = []
-        for i in tqdm(range(self.total_frames)):
-            success, frame = cap.read()
-            if not success:
-                return
-            self.frames.append(frame)
-        cap.release()
-
-    def convert_video_to_images(self, cap):
-        for i in tqdm(range(self.total_frames)):
-            success, frame = cap.read()
-            if not success:
-                return
-            cv2.imwrite(str(self.dir / 'images' / f'{i}.jpg'), frame)
-        cap.release()
-
-    def load_data(self):
-        import glob
-        
-        self.dir = Path(QFileDialog.getExistingDirectory(self, "Select Directory"))
-        # self.dir = Path("D:\\GitHub\\GuitarPlay2Tab\\video\\video7")
-        print(f"Working on dir: {self.dir}")
-
-        filename = glob.glob(str(self.dir / '*.pickle*'))
-        if filename:
-            with open(filename[0], 'rb') as f:
-                self.detected_frames, self.model_output = pickle.load(f)
-            self.slider.colored_marks = {k: QColor("green") for k in self.detected_frames}
-        
-        filename = glob.glob(str(self.dir / '*.mp4*'))
-        if not filename:
-            print("Video not found.")
-            return
-        cap = cv2.VideoCapture(filename[0])
-        self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if not os.path.isdir(str(self.dir / 'images')):
-            os.mkdir(str(self.dir / 'images'))
-            if not cap.isOpened():
-                self.video_label.setText("Failed to open video file.")
-                return
-            self.convert_video_to_images(cap)
-        
-        if self.is_images_cache:
-            cap = cv2.VideoCapture(filename[0])
-            self.cache_video(cap)
-        self.slider.setMaximum(self.total_frames - 1)
-        self.slider.setEnabled(True)
-        self.slider.setValue(0)
-
 
 if __name__ == "__main__":
+    # Dealing with Python relative import issues
     import sys
     import os
-
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
     sys.path.append(os.path.dirname(SCRIPT_DIR))
-
-    import video_processing.utils.utils_math as utils
-    from video_processing.utils.utils_math import crop_from_oriented_bb, oriented_bb_from_frets_strings, linesP_to_houghlines
-
-    from video_processing.detector import Detector, HandDetector, DetectorStatus
-    from video_processing.tracker import TrackerLightGlue, Tracker
-    from video_processing.utils.visualize import draw_fretboard
-    from video_processing.fretboard import Fretboard
     
     app = QApplication(sys.argv)
-    player = VideoPlayer(detector=Detector(), tracker=TrackerLightGlue(), backup_tracker=Tracker(), hand_detector=HandDetector())
+    player = VideoPlayer(detector=Detector(), tracker=TrackerLightGlue(), 
+                         backup_tracker=Tracker(), hand_detector=HandDetector())
 
     player.show()
     sys.exit(app.exec())

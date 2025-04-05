@@ -492,14 +492,11 @@ class HandDetector(DetectorInterface):
         import mediapipe as mp
         # mp_drawing = mp.solutions.drawing_utils
         mp_hands = mp.solutions.hands
-        self.model_hands = mp_hands.Hands(min_detection_confidence = 0.5, min_tracking_confidence=0.5)
+        self.model_hands = mp_hands.Hands(min_detection_confidence = 0.7, min_tracking_confidence=0.8, max_num_hands=1)
         self.transform_points = transform_points
     
-    def hand_position_estimation(self, cropped_frame, fretboard, crop_transform):
-        frets = utils.transform_houghlines(fretboard.frets, np.linalg.inv(crop_transform))
-        strings = utils.transform_houghlines(fretboard.strings, np.linalg.inv(crop_transform))
-
-        cornerpoints = utils.cornerpoints_from_frets_strings(frets, strings).astype(int)
+    def hand_position_estimation(self, frame, fretboard):
+        cornerpoints = utils.cornerpoints_from_frets_strings(fretboard.frets, fretboard.strings).astype(int)
         h = abs(cornerpoints[1, 1] - cornerpoints[0, 1])
         w = abs(cornerpoints[2, 0] - cornerpoints[0, 0])
         target_cornerpoints = np.array([
@@ -510,7 +507,7 @@ class HandDetector(DetectorInterface):
         ])
 
         M, mask = cv2.findHomography(cornerpoints, target_cornerpoints, cv2.RANSAC, 5.0)
-        rect_img = cv2.warpPerspective(cropped_frame, M, (w, h), flags=cv2.INTER_LINEAR)
+        rect_img = cv2.warpPerspective(frame, M, (w, h), flags=cv2.INTER_LINEAR)
 
         # R-X color anomaly detection
         choices = np.random.randint(0, rect_img.shape[0]*rect_img.shape[0], 10000)
@@ -527,45 +524,45 @@ class HandDetector(DetectorInterface):
 
         return utils.transform_points(center, np.linalg.inv(M)).reshape(-1,).astype(int)
     
-    def detect(self, frame, fretboard=None, crop_transform=None, prev_hands=None):
-        if fretboard is not None:
-            if prev_hands is not None:
-                hand_pos = np.mean(prev_hands[0], axis=0)
-                hand_pos = utils.transform_points(hand_pos.reshape((1, 2)), crop_transform).reshape(-1,).astype(int)
-            else:
-                hand_pos = self.hand_position_estimation(frame, fretboard, crop_transform)
-            if hand_pos is not None:
-                bb = [hand_pos[0]-int(0.5*frame.shape[0]), 0, frame.shape[0], frame.shape[0]]
-
-                frame = frame[bb[1]:bb[1]+bb[3], bb[0]:bb[0]+bb[2], :]
-
-                if frame.shape[0] == 0 or frame.shape[1] == 0:
-                    return None
-
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                shift_mat = np.eye(3)
-                shift_mat[0, 2] = -bb[0]
-                shift_mat[1, 2] = -bb[1]
-
-                crop_transform = shift_mat @ crop_transform
-
-                results = self.model_hands.process(frame)
-            else:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = self.model_hands.process(frame)
-            
-        else:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            # frame.flags.writeable = False
-            results = self.model_hands.process(frame)
-            # frame.flags.writeable = True
-        if crop_transform is not None:
-            return self.hand_mediapipe_to_numpy(results, frame, crop_transform)
-        else:
-            return self.hand_mediapipe_to_numpy(results, frame)
+    def detect(self, frame, fretboard=None, bb=None, prev_hands=None):
+        if bb is not None:
+            frame_bb = frame[bb[1]:bb[1]+bb[3], bb[0]:bb[0]+bb[2], :]
+            cv2.imshow('hey', frame_bb)
+            cv2.waitKey(1)
+            frame_bb = cv2.cvtColor(frame_bb, cv2.COLOR_BGR2RGB)
+            results = self.model_hands.process(frame_bb)
+            return self.hand_mediapipe_to_numpy(results, frame_bb, bb)
     
-    def hand_mediapipe_to_numpy(self, results, frame, crop_transform=None):
+        if prev_hands is not None:
+            prev_hands_bb = cv2.boundingRect(prev_hands[0])
+            prev_size = max([prev_hands_bb[2], prev_hands_bb[3]])
+            hand_pos = np.mean(prev_hands[0], axis=0)
+            
+            size = int(1.5*prev_size)
+            bb = [int(hand_pos[0]-0.5*size), int(hand_pos[1]-0.5*size), size, size]
+            frame_bb = frame[bb[1]:bb[1]+bb[3], bb[0]:bb[0]+bb[2], :]
+            cv2.imshow('hey', frame_bb)
+            cv2.waitKey(1)
+            frame_bb = cv2.cvtColor(frame_bb, cv2.COLOR_BGR2RGB)
+            results = self.model_hands.process(frame_bb)
+            return self.hand_mediapipe_to_numpy(results, frame_bb, bb)
+        
+        # if fretboard is None:
+        cv2.imshow('hey', frame)
+        cv2.waitKey(1)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.model_hands.process(frame)
+        return self.hand_mediapipe_to_numpy(results, frame)
+        
+        # hand_pos = self.hand_position_estimation(frame, fretboard)
+        # size = int(1.2*fretboard.oriented_bb[1][1])
+        # bb = [int(hand_pos[0]-0.5*size), int(hand_pos[1]-0.5*size), size, size]
+        # frame_bb = frame[bb[1]:bb[1]+bb[3], bb[0]:bb[0]+bb[2], :]
+        # frame_bb = cv2.cvtColor(frame_bb, cv2.COLOR_BGR2RGB)
+        # results = self.model_hands.process(frame_bb)
+        # return self.hand_mediapipe_to_numpy(results, frame_bb, bb)
+    
+    def hand_mediapipe_to_numpy(self, results, frame, bb=None):
         if results.multi_hand_landmarks:
             h, w = frame.shape[0], frame.shape[1]
             hands = [[] for _ in range(len(results.multi_hand_landmarks))]
@@ -574,9 +571,12 @@ class HandDetector(DetectorInterface):
                     hands[i].append([int(hand.landmark[idx].x * w), int(hand.landmark[idx].y * h)])
             hands = np.array(hands)
 
-            if crop_transform is not None:
+            if bb is not None:
+                shift_mat = np.eye(3)
+                shift_mat[0, 2] = -bb[0]
+                shift_mat[1, 2] = -bb[1]
                 for i in range(len(results.multi_hand_landmarks)):
-                    hands[i, ...] = self.transform_points(hands[i, ...], np.linalg.inv(crop_transform)).astype(int)
+                    hands[i, ...] = self.transform_points(hands[i, ...], np.linalg.inv(shift_mat)).astype(int)
             return hands
         else:
             return None

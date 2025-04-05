@@ -6,3 +6,8 @@ __pycache__/
 /legacy
 /manim_animation
 *.ipynb
+/datasets
+/runs
+yolo*
+/train_fretboard
+/.vscode

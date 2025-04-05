@@ -131,6 +131,21 @@ def linesP_to_houghlines(linesP, sort=True):
     dists = np.array(dists)
     return np.concatenate((dists[:, np.newaxis], angles[:, np.newaxis]), axis=1)
 
+def fretboard_from_yolo(keypoints):
+    frets = linesP_to_houghlines(np.expand_dims(keypoints.reshape((-1, 4)), axis=1))
+    
+    strings = keypoints.reshape((-1, 4))[[0, -1]]
+    tmp = strings[0, 2:].copy()
+    strings[0, 2:] = strings[1, :2]
+    strings[1, :2] = tmp
+    strings = linesP_to_houghlines(np.expand_dims(strings, axis=1))
+
+    oriented_bb = oriented_bb_from_frets_strings(frets, strings)
+    oriented_bb = (oriented_bb[0], (oriented_bb[1][0] + 50, oriented_bb[1][1] + 100), oriented_bb[2])
+
+    fretboard = Fretboard(frets, strings, oriented_bb)
+    return fretboard
+
 def houghlines_y_from_x(lines, x):
     return (lines[:, 0] - x*np.cos(lines[:, 1])) / np.sin(lines[:, 1])
 
@@ -259,6 +274,12 @@ class HoughBundler:
         return np.asarray(merged_lines_all)
 
 # ------------------------------------------------------------------------------------------------------------
+def pnt_line_dist(pnt, line):
+    return np.abs(line[0] - pnt[0]*np.cos(line[1]) - pnt[1]*np.sin(line[1]))
+
+def lineP_line_dist(lineP, line):
+    return np.min((pnt_line_dist(lineP[:2], line), pnt_line_dist(lineP[2:], line)))
+
 def line_image_intersection(line: Union[np.typing.NDArray, List], shape: Tuple[int]) -> NDArray:
     '''
     This assumes the line is within the image's boundaries.
