@@ -1,3 +1,13 @@
+# Neural Network Solution
+If you're only interested in fretboard detection, I built a dataset using this project and trained a Ultralytics YOLO-11 model with it, just use the `last.pt` weights and it will output positions of the frets' end-points.
+```
+from ultralytics import YOLO
+
+model_path = "...\\last.pt"
+yolo_model = YOLO(model_path)
+results = yolo_model.predict(source=image)
+```
+
 # GuitarPlay2Tab
 Use computer vision and audio processing tools to convert guitar playing into tab. Under active development.
 
